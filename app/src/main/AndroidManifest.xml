@@ -3,6 +3,14 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- OpenCL 是 vendor 库（/vendor/lib64/libOpenCL.so，高通 GPU 驱动自带）。
+         Android 12+ 应用命名空间默认摸不到 vendor 库，必须显式声明才能把
+         /vendor/lib64 加进本应用 native 库的搜索路径。required=false 保证
+         没有 OpenCL 的设备（联发科等）也能正常安装，只是加速方式里选不了 OpenCL。 -->
+    <uses-native-library
+        android:name="libOpenCL.so"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
