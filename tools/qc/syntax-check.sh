@@ -79,7 +79,9 @@ OWN_ERRORS="$(awk -v pat='dev[.]cliptranslate[.]' '
         }
     }
     END { if (diag != "" && diag ~ pat) print diag }
-' "$RAW_LOG")"
+' "$RAW_LOG" | grep -v -E 'dev[.]cliptranslate[.]R([.[:space:]]|$)' || true)"
+# The generated R class (dev.cliptranslate.R) is produced by AAPT at build time,
+# so any reference to it is unresolved in this SDK-less parse -- whitelist it.
 
 count_lines() {
     if [ -z "$1" ]; then
