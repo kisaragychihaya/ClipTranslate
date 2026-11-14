@@ -79,6 +79,19 @@ android {
             version = "3.22.1"
         }
     }
+
+    // OpenCL 的链接桩（src/main/cpp/CMakeLists.txt 里 configure 期生成）只是给链接器
+    // 用的，运行时必须由设备 /vendor/lib64/libOpenCL.so 提供（它在
+    // /vendor/etc/public.libraries.txt 里登记过）。AGP 会把 CMake 输出目录里的 *.so
+    // 自动打包，把桩打进 APK 会让 OpenCL 后端拿到一堆空实现 —— 这里显式排除。
+    // 桩在磁盘上叫 libOpenCL.linkstub（不以 .so 结尾，CMake 侧已经避开一次），
+    // 两个名字都排除掉，算双保险。
+    packaging {
+        jniLibs {
+            excludes += "**/libOpenCL.so"
+            excludes += "**/libOpenCL.linkstub"
+        }
+    }
 }
 
 kotlin {

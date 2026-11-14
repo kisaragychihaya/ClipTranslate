@@ -87,10 +87,12 @@ set(GGML_CPU        ON  CACHE BOOL "" FORCE)
 #      找驱动，而小米 15 Ultra 上这个目录根本不存在。
 #
 #      这里需要的是一个**只用于链接**的桩：把 CL 头里所有 clXxx 函数名抠出来，生成
-#      空函数体，编成一个 SONAME=libOpenCL.so 的 .so，交给 find_package(OpenCL)。
-#      于是我们的 .so 记录 DT_NEEDED=libOpenCL.so，运行时由系统的 vendor 库满足；
-#      桩本身不打进 APK（它不是 CMake 里的 target，AGP 只打包 native target 的产物，
-#      CI 里还有一道守卫检查 APK 里没有 libOpenCL.so）。
+#      空函数体，configure 期直接用一个 execute_process 编成 SONAME=libOpenCL.so 的
+#      共享库（不是 CMake target，用不到 find_package 的 target 形态，只要路径）。
+#      于是我们的 .so 记录 DT_NEEDED=libOpenCL.so，运行时由系统的 vendor 库满足。
+#      这个桩绝不能进 APK：AGP 会把 CMake 输出目录里的 *.so 自动打包，所以桩的文件名
+#      起成 libOpenCL.linkstub（运行时名字只由 soname 决定），build.gradle.kts 里另有
+#      packaging.jniLibs.excludes 兜底，CI 守卫还会检查 APK 里没有 libOpenCL*。
 #      已核对：ggml-opencl 引用到的 37 个 CL 函数在该真机 /vendor/lib64/libOpenCL.so
 #      里全部有导出，不会出现 “cannot locate symbol” 导致整个 .so 加载失败。
 # ---------------------------------------------------------------------------
@@ -133,7 +135,12 @@ if(ANDROID AND CLIPTRANSLATE_GPU_OPENCL)
     endforeach()
     file(WRITE "${_cl_stub_dir}/opencl_link_stub.c" "${_cl_stub_src}")
 
-    set(_cl_stub_so "${_cl_stub_dir}/libOpenCL.so")
+    # 桩的文件名故意不以 .so 结尾：AGP 会把 CMake 输出目录里的 *.so 自动收进 APK
+    # （上一轮 CI 就是这么把 libOpenCL.so 桩打进包、被守卫抓到的），而运行时用的名字
+    # 只由 -Wl,-soname 决定，跟磁盘上的文件名无关 —— DT_NEEDED 照样是 libOpenCL.so，
+    # 运行时由设备 /vendor/lib64/libOpenCL.so 满足。build.gradle.kts 的
+    # packaging.jniLibs.excludes 还有一层兜底。
+    set(_cl_stub_so "${_cl_stub_dir}/libOpenCL.linkstub")
     set(_cl_target_flag "")
     if(CMAKE_C_COMPILER_TARGET)
         # NDK 的 clang 不带 --target 就按 host（x86_64）出 ELF，aarch64 链接器会拒绝。

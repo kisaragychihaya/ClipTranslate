@@ -72,7 +72,7 @@ jobs:
             echo "OK: lib/arm64-v8a/libcliptranslate_jni.so"
             echo "--- lib/ 全部内容"
             unzip -l "$apk" | grep "lib/" || true
-            for unwanted in libOpenCL.so libvulkan.so; do
+            for unwanted in libOpenCL.so libOpenCL.linkstub libvulkan.so; do
               if unzip -l "$apk" | grep -q "lib/arm64-v8a/${unwanted}"; then
                 echo "::error::$apk 里出现了 ${unwanted}（OpenCL 链接桩不该进包，Vulkan 用系统的 /system/lib64/libvulkan.so）"
                 exit 1
