@@ -11,12 +11,28 @@ android {
     namespace = "dev.cliptranslate"
     compileSdk = 36
 
+    // 与 .github/workflows/build-apk.yml 里 setup-android 安装的 NDK 版本保持一致。
+    // 27.3.13750724 是 ubuntu-24.04 runner 镜像自带的默认 NDK（ANDROID_NDK_ROOT 指向它），
+    // 写死它 CI 就不用额外下载 NDK。
+    ndkVersion = "27.3.13750724"
+
     defaultConfig {
         applicationId = "dev.cliptranslate"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+
+        // 本地推理只做 arm64（llama.cpp CPU 版）；x86 模拟器跑不了这个 .so。
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-O3"
+            }
+        }
     }
 
     signingConfigs {
@@ -52,6 +68,16 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    // llama.cpp 用 CMake FetchContent 拉源码，构建脚本在 src/main/cpp。
+    // version 必须和 CI 里 setup-android 安装的 `cmake;3.22.1` 一致，
+    // 否则 AGP 会报 “CMake 3.22.1 not found in SDK”。
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 

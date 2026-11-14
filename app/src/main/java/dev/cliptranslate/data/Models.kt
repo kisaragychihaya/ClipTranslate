@@ -18,3 +18,13 @@ data class Provider(
     val models: List<ModelInfo> = emptyList(),
     val defaultModelId: String? = null,
 )
+
+/** 内置「本地离线翻译」Provider 的固定 id。它不写进 SharedPreferences，由 [ProviderRepository] 每次注入到列表首位。 */
+const val LOCAL_PROVIDER_ID = "local-translategemma"
+
+/** 内置本地模型的 id，对应 ModelManager 下载的那个 GGUF。 */
+const val LOCAL_MODEL_ID = "translategemma-4b-it"
+
+/** 内置 Provider 不可编辑、不可删除；UI 据此隐藏编辑/删除入口。 */
+val Provider.isBuiltin: Boolean
+    get() = id == LOCAL_PROVIDER_ID

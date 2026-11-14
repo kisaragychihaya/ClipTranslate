@@ -65,6 +65,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cliptranslate.R
 import dev.cliptranslate.core.Languages
+import dev.cliptranslate.data.LOCAL_PROVIDER_ID
 
 private const val QUICK_LANGUAGE_COUNT = 8
 
@@ -284,6 +285,17 @@ private fun ProviderSection(
                     modifier = Modifier.weight(1f),
                 )
                 TextButton(onClick = onOpenSettings) { Text("去设置拉取") }
+            }
+        }
+        if (provider.id == LOCAL_PROVIDER_ID && !state.localModelReady) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "本地模型还没下载，去设置里下载后即可离线翻译",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onOpenSettings) { Text("去下载") }
             }
         }
     }

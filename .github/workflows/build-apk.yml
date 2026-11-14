@@ -20,11 +20,14 @@ jobs:
 
       # 与参考仓库 kisaragychihaya/honor_8e5_ubl 同款方案：
       # setup-android@v4 + 指定 cmdline-tools 版本，再按需安装平台与构建工具。
+      # cmake;3.22.1 = AGP 里 externalNativeBuild.cmake.version 指定的版本（SDK 里必须
+      # 有这一份才能编译 app/src/main/cpp）；ndk;27.3.13750724 = gradle 的 ndkVersion，
+      # 该版本本来就是 ubuntu-24.04 镜像自带的默认 NDK，这一步通常直接命中缓存。
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: "14742923"
-          packages: "platforms;android-36 build-tools;36.0.0 platform-tools"
+          packages: "platforms;android-36 build-tools;36.0.0 platform-tools cmake;3.22.1 ndk;27.3.13750724"
           log-accepted-android-sdk-licenses: false
 
       - name: Grant execute permission for gradlew
@@ -38,9 +41,36 @@ jobs:
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: ./gradlew :app:assembleRelease --stacktrace
 
+      # 守卫：externalNativeBuild 失败/被跳过时 AGP 仍可能产出一个没有 .so 的 APK，
+      # 那种包在真机上只会给出「推理库未内置」。这里直接让 CI 红掉，省一轮人工排查。
+      - name: Verify native library is packaged
+        run: |
+          set -euo pipefail
+          for apk in app/build/outputs/apk/release/*.apk; do
+            echo "--- $apk"
+            if ! unzip -l "$apk" | grep -q "lib/arm64-v8a/libcliptranslate_jni.so"; then
+              echo "::error::$apk 里没有 lib/arm64-v8a/libcliptranslate_jni.so（native 构建没跑或没被打包）"
+              unzip -l "$apk" | grep "lib/" || true
+              exit 1
+            fi
+            echo "OK: lib/arm64-v8a/libcliptranslate_jni.so"
+          done
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: cliptranslate-release-apk
           path: app/build/outputs/apk/release/*.apk
+          retention-days: 7
+
+      # debug 包用于 ADB 真机验证本地推理：debuggable 才能 run-as 把 GGUF 推进
+      # /data/data/dev.cliptranslate/files/ 里，且不受 release 签名配置影响。
+      - name: Build Debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload Debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cliptranslate-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
           retention-days: 7

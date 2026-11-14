@@ -1,0 +1,206 @@
+package dev.cliptranslate.local
+
+import android.app.ActivityManager
+import android.content.Context
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+/** 本地推理失败；message 一律是可以直接展示给用户的中文说明。 */
+class LocalTranslateException(message: String) : Exception(message)
+
+/**
+ * TranslateGemma 4B（GGUF）的本地推理器。
+ *
+ * 懒加载：第一次翻译时才 `ensureLoaded()` → `nativeLoad()`，之后复用 handle；
+ * llama.cpp 的 context 不能并发使用，所以整条调用链用 [Mutex] 串行化。
+ * 装载失败（APK 没内置 `.so`、内存不足、模型文件缺失）一律抛 [LocalTranslateException]，
+ * 由上层降级成错误提示，不会影响在线翻译。
+ */
+class LocalTranslator private constructor(context: Context) {
+
+    private val appContext = context.applicationContext
+    private val mutex = Mutex()
+
+    /**
+     * native handle；0 表示尚未加载。只在 [mutex] 内读写。
+     *
+     * 刻意不主动调用 [LlamaBridge.nativeUnload]：卸载时若还有生成在跑会让 native 侧出现
+     * use-after-free，而 handle 的生命周期跟着进程走、对用户没有可见影响。
+     * 模型被删除又重新下载后 handle 仍指向已删除的旧文件，但内容同一个 SHA256，等价于同一个模型。
+     */
+    private var handle: Long = 0L
+
+    /** 阻塞式翻译；内部已切到 [Dispatchers.IO]，UI 层直接 await 即可。 */
+    suspend fun translate(text: String, targetCode: String): String = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val sourceCode = detectSourceCode(text)
+            val prompt = buildLocalPrompt(text.trim(), sourceCode, targetCode)
+            val loaded = ensureHandle()
+            val raw = try {
+                LlamaBridge.nativeGenerate(loaded, prompt, MAX_TOKENS)
+            } catch (e: RuntimeException) {
+                // native 层的 message 已经带错误码/原因，原样向上传（ERR_TOO_LONG 翻译成中文）。
+                throw LocalTranslateException(mapNativeError(e.message))
+            }
+            raw.trim()
+        }
+    }
+
+    // --- 加载 ---------------------------------------------------------------
+
+    private fun ensureHandle(): Long {
+        if (handle != 0L) return handle
+        if (!LlamaBridge.ensureLoaded()) {
+            throw LocalTranslateException(
+                "本地推理库未内置在此安装包中（缺少 libcliptranslate_jni.so），请安装 CI 构建的版本",
+            )
+        }
+        checkAvailableMemory()
+        val model = ModelManager.get(appContext).modelFile
+        if (!model.exists()) {
+            throw LocalTranslateException("本地模型文件不存在，请先在设置中下载")
+        }
+        val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)
+        val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE)
+        if (loaded == 0L) {
+            throw LocalTranslateException("本地模型加载失败（内存不足或模型文件损坏）")
+        }
+        handle = loaded
+        return loaded
+    }
+
+    /** 4B Q4_K_M 常驻约 3GB，加载前先看可用内存，不够就给可读提示而不是被系统杀掉。 */
+    private fun checkAvailableMemory() {
+        val manager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            ?: return
+        val info = ActivityManager.MemoryInfo()
+        manager.getMemoryInfo(info)
+        if (info.availMem < MIN_AVAILABLE_MEMORY_BYTES) {
+            throw LocalTranslateException(
+                "可用内存不足（需要约 4.5GB，当前 ${formatGigabytes(info.availMem)} GB）",
+            )
+        }
+    }
+
+    companion object {
+        private const val CONTEXT_SIZE = 4096
+        private const val MAX_TOKENS = 1024
+
+        /** 4.5GB = 4.5 * 1024 * 1024 * 1024，写成字面量才能是编译期常量。 */
+        private const val MIN_AVAILABLE_MEMORY_BYTES = 4_831_838_208L
+
+        private const val ERR_TOO_LONG = "ERR_TOO_LONG"
+
+        @Volatile private var instance: LocalTranslator? = null
+
+        /** 进程内单例：native handle 只能有一份，重复 nativeLoad 会白吃一倍内存。 */
+        fun get(context: Context): LocalTranslator = instance ?: synchronized(this) {
+            instance ?: LocalTranslator(context.applicationContext).also { instance = it }
+        }
+    }
+
+    private fun mapNativeError(message: String?): String {
+        val text = message?.trim().orEmpty()
+        if (text.startsWith(ERR_TOO_LONG)) return "文本过长，本地模型上下文不足"
+        return text.ifBlank { "本地推理失败" }
+    }
+
+    private fun formatGigabytes(bytes: Long): String =
+        String.format(Locale.US, "%.1f", bytes / 1024.0 / 1024.0 / 1024.0)
+}
+
+// --- 语言与提示词（纯函数，方便单独验证） -----------------------------------
+
+/** App 语言代码 → 模型提示词里用的英文语言名。原文要求的映射表，未列出的代码原样使用。 */
+private val LANGUAGE_NAMES: Map<String, String> = mapOf(
+    "zh-CN" to "Chinese",
+    "zh-TW" to "Chinese",
+    "en" to "English",
+    "ja" to "Japanese",
+    "ko" to "Korean",
+    "fr" to "French",
+    "de" to "German",
+    "es" to "Spanish",
+    "ru" to "Russian",
+    "pt" to "Portuguese",
+    "it" to "Italian",
+    "ar" to "Arabic",
+    "th" to "Thai",
+    "vi" to "Vietnamese",
+    "id" to "Indonesian",
+    "tr" to "Turkish",
+    "pl" to "Polish",
+    "nl" to "Dutch",
+    "hi" to "Hindi",
+    "uk" to "Ukrainian",
+)
+
+internal fun englishLanguageName(code: String): String = LANGUAGE_NAMES[code] ?: code
+
+/**
+ * 源语言启发式检测：TranslateGemma 要求必须给出源语言，而 App 不要求用户选源语言。
+ *
+ * 顺序即优先级：假名最高（日文里混着大量汉字，先认假名才不会误判成中文），
+ * 之后依次 Hangul / 泰文 / 天城文 / 阿拉伯文 / 西里尔 / 汉字，全不匹配按英语处理。
+ */
+internal fun detectSourceCode(text: String): String {
+    var hangul = false
+    var thai = false
+    var devanagari = false
+    var arabic = false
+    var cyrillic = false
+    var han = false
+
+    for (ch in text) {
+        val code = ch.code
+        when {
+            code in 0x3040..0x30FF || code in 0x31F0..0x31FF || code in 0xFF66..0xFF9D -> return "ja"
+            code in 0xAC00..0xD7AF || code in 0x1100..0x11FF || code in 0x3130..0x318F -> hangul = true
+            code in 0x0E00..0x0E7F -> thai = true
+            code in 0x0900..0x097F -> devanagari = true
+            code in 0x0600..0x06FF || code in 0x0750..0x077F -> arabic = true
+            code in 0x0400..0x04FF -> cyrillic = true
+            code in 0x4E00..0x9FFF || code in 0x3400..0x4DBF || code in 0xF900..0xFAFF -> han = true
+        }
+    }
+
+    return when {
+        hangul -> "ko"
+        thai -> "th"
+        devanagari -> "hi"
+        arabic -> "ar"
+        cyrillic -> "ru"
+        han -> "zh-CN"
+        else -> "en"
+    }
+}
+
+/**
+ * TranslateGemma 官方 chat template 的展开形式，必须逐字一致 ——
+ * 少一个换行、多一个空格都会影响译文质量，改动前请对照官方模板。
+ * 结尾的换行让模型从 `<start_of_turn>model` 的下一行开始生成。
+ */
+internal fun buildLocalPrompt(text: String, sourceCode: String, targetCode: String): String {
+    val src = englishLanguageName(sourceCode)
+    val tgt = englishLanguageName(targetCode)
+    return buildString {
+        append("<start_of_turn>user\n")
+        append(
+            "You are a professional $src ($sourceCode) to $tgt ($targetCode) translator. " +
+                "Your goal is to accurately convey the meaning and nuances of the original $src text " +
+                "while adhering to $tgt grammar, vocabulary, and cultural sensitivities.\n",
+        )
+        append(
+            "Produce only the $tgt translation, without any additional explanations or commentary. " +
+                "Please translate the following $src text into $tgt:\n",
+        )
+        append("\n")
+        append("\n")
+        append(text)
+        append("<end_of_turn>\n")
+        append("<start_of_turn>model\n")
+    }
+}

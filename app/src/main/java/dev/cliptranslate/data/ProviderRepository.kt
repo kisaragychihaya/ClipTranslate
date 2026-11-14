@@ -1,6 +1,7 @@
 package dev.cliptranslate.data
 
 import android.content.Context
+import dev.cliptranslate.R
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -10,23 +11,24 @@ import org.json.JSONObject
  * 存储：SharedPreferences("providers") 的 key "json" 里放一个 JSON 数组字符串，
  * 每个元素形如 {id, name, baseUrl, apiKey, defaultModelId, models:[{id, ownedBy}]}。
  * 读取一律容错：空串、坏 JSON、类型不符都退化成空列表，绝不因为历史脏数据崩溃。
+ *
+ * 内置的「本地模型」Provider（[LOCAL_PROVIDER_ID]）不进存储：每次 [load] 都注入到列表首位，
+ * 存储里只放用户自己配置的 Provider，因此它天然不可编辑、不可删除。
  */
 class ProviderRepository(context: Context) {
 
-    private val prefs =
-        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /** 全量读取。首次运行（"json" 这个 key 压根不存在）时先写入内置种子。 */
+    /** 全量读取：[builtinProviders] + 用户配置。首次运行（"json" 这个 key 不存在）时先写入内置种子。 */
     @Synchronized
-    fun load(): List<Provider> {
-        ensureSeeded()
-        return readAll()
-    }
+    fun load(): List<Provider> = builtinProviders() + readUserProviders()
 
-    /** 同 id 覆盖，否则追加到末尾。 */
+    /** 同 id 覆盖，否则追加到末尾。内置 Provider 不在存储里，直接忽略。 */
     @Synchronized
     fun upsert(provider: Provider) {
-        val current = load()
+        if (provider.isBuiltin) return
+        val current = readUserProviders()
         val index = current.indexOfFirst { it.id == provider.id }
         val next = if (index >= 0) {
             current.toMutableList().also { it[index] = provider }
@@ -39,11 +41,31 @@ class ProviderRepository(context: Context) {
     /** 删除指定 id 并写回；删掉最后一个时 key 变成 "[]"，种子因此不会复活。 */
     @Synchronized
     fun delete(id: String) {
-        writeAll(load().filterNot { it.id == id })
+        if (id == LOCAL_PROVIDER_ID) return
+        writeAll(readUserProviders().filterNot { it.id == id })
     }
 
     @Synchronized
     fun get(id: String): Provider? = load().firstOrNull { it.id == id }
+
+    // --- 内置 Provider -------------------------------------------------------
+    // 本地 GGUF 推理，没有 baseUrl / apiKey；名称取自 strings.xml，UI 与数据层共用一份文案。
+    private fun builtinProviders(): List<Provider> = listOf(
+        Provider(
+            id = LOCAL_PROVIDER_ID,
+            name = appContext.getString(R.string.local_provider_name),
+            baseUrl = "",
+            apiKey = "",
+            models = listOf(ModelInfo(LOCAL_MODEL_ID)),
+            defaultModelId = LOCAL_MODEL_ID,
+        ),
+    )
+
+    /** 存储里的用户 Provider（含历史遗留的同 id 脏数据，一并过滤掉）。 */
+    private fun readUserProviders(): List<Provider> {
+        ensureSeeded()
+        return readAll().filterNot { it.isBuiltin }
+    }
 
     // --- 种子 ---------------------------------------------------------------
     // 只在 key 完全不存在时写一次；用户删掉后存储里至少剩 "[]"，key 已存在，因此不会复活。

@@ -7,8 +7,14 @@ import androidx.lifecycle.viewModelScope
 import dev.cliptranslate.core.Languages
 import dev.cliptranslate.core.Prompts
 import dev.cliptranslate.core.TextUtil
+import dev.cliptranslate.data.LOCAL_PROVIDER_ID
 import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
+import dev.cliptranslate.local.LocalSettings
+import dev.cliptranslate.local.LocalTranslateException
+import dev.cliptranslate.local.LocalTranslator
+import dev.cliptranslate.local.ModelManager
+import dev.cliptranslate.local.ModelState
 import dev.cliptranslate.net.OpenAiClient
 import dev.cliptranslate.net.OpenAiException
 import dev.cliptranslate.platform.ClipboardHelper
@@ -17,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -30,6 +37,8 @@ data class TranslateUiState(
     val providerId: String? = null,
     val modelId: String? = null,
     val providers: List<Provider> = emptyList(),
+    /** 本地模型文件是否已就绪（选中本地 Provider 但没下载时，主界面据此提示去设置下载）。 */
+    val localModelReady: Boolean = false,
 ) {
     val currentProvider: Provider?
         get() = providers.firstOrNull { it.id == providerId }
@@ -42,21 +51,36 @@ data class TranslateUiState(
 
 class TranslateViewModel(application: Application) : AndroidViewModel(application) {
 
+    private val app = application
     private val repository = ProviderRepository(application)
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val modelManager = ModelManager.get(application)
 
     private val _state = MutableStateFlow(TranslateUiState())
     val state: StateFlow<TranslateUiState> = _state.asStateFlow()
 
     init {
+        LocalSettings.attach(application)
         _state.update {
             it.copy(
                 targetCode = restoreTargetCode(),
                 providerId = prefs.getString(KEY_PROVIDER_ID, null),
                 modelId = prefs.getString(KEY_MODEL_ID, null),
+                localModelReady = modelManager.state.value is ModelState.Ready,
             )
         }
         refreshProviders()
+
+        // 下载完成 / 被删除后，主界面的「本地模型未下载」提示要跟着变。
+        viewModelScope.launch {
+            modelManager.state.collect { modelState ->
+                _state.update { it.copy(localModelReady = modelState is ModelState.Ready) }
+            }
+        }
+        // 设置页切换「启用本地离线翻译」后，服务商列表要重新过滤（首次值由 refreshProviders 处理）。
+        viewModelScope.launch {
+            LocalSettings.enabled.drop(1).collect { refreshProviders() }
+        }
     }
 
     // --- 输入与选择 ---------------------------------------------------------
@@ -113,9 +137,12 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
     // --- 服务商 / 模型 ------------------------------------------------------
 
     fun refreshProviders() {
+        val localEnabled = LocalSettings.enabled.value
         viewModelScope.launch {
             val providers = withContext(Dispatchers.IO) {
                 runCatching { repository.load() }.getOrDefault(emptyList())
+                    // 关掉「启用本地离线翻译」时，主界面的服务商列表里不出现内置本地 Provider。
+                    .filter { it.id != LOCAL_PROVIDER_ID || localEnabled }
             }
             _state.update { current ->
                 val provider = providers.firstOrNull { it.id == current.providerId }
@@ -134,6 +161,7 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
                     providers = providers,
                     providerId = provider?.id,
                     modelId = model,
+                    localModelReady = modelManager.state.value is ModelState.Ready,
                 )
             }
             persistSelection()
@@ -156,22 +184,33 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
             _state.update { it.copy(error = "未配置服务商，请先在设置中添加") }
             return
         }
-        val model = snapshot.effectiveModelId
-        if (model == null) {
+        val targetCode = snapshot.targetCode
+        val isLocal = provider.id == LOCAL_PROVIDER_ID
+        val model = snapshot.effectiveModelId.orEmpty()
+        if (isLocal) {
+            // 本地链路不依赖模型 id，但必须有下载好且校验通过的模型文件。
+            if (modelManager.state.value !is ModelState.Ready) {
+                _state.update { it.copy(error = "请先在设置中下载本地模型") }
+                return
+            }
+        } else if (model.isBlank()) {
             _state.update { it.copy(error = "请先在设置中选择模型") }
             return
         }
-        val targetCode = snapshot.targetCode
 
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, error = null) }
             try {
                 val result = withContext(Dispatchers.IO) {
-                    OpenAiClient(provider.baseUrl, provider.apiKey).chat(
-                        model,
-                        Prompts.systemPrompt(targetCode),
-                        Prompts.userPrompt(text, targetCode),
-                    )
+                    if (isLocal) {
+                        LocalTranslator.get(app).translate(text, targetCode)
+                    } else {
+                        OpenAiClient(provider.baseUrl, provider.apiKey).chat(
+                            model,
+                            Prompts.systemPrompt(targetCode),
+                            Prompts.userPrompt(text, targetCode),
+                        )
+                    }
                 }
                 _state.update {
                     it.copy(
@@ -183,6 +222,9 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: CancellationException) {
                 _state.update { it.copy(isLoading = false) }
                 throw e
+            } catch (e: LocalTranslateException) {
+                // 本地推理的失败信息本身就是给人看的，不再加「请求失败」前缀。
+                _state.update { it.copy(isLoading = false, error = e.message ?: "本地翻译失败") }
             } catch (e: OpenAiException) {
                 _state.update { it.copy(isLoading = false, error = e.message ?: "请求失败") }
             } catch (e: Exception) {

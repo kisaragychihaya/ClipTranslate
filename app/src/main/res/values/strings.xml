@@ -1,4 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">模译</string>
+
+    <!-- 本地模型（离线翻译） -->
+    <string name="local_provider_name">本地模型 · TranslateGemma 4B（离线）</string>
+    <string name="local_model_title">本地模型（离线翻译）</string>
+    <string name="local_model_desc">模型保存在应用私有目录，卸载应用时自动删除</string>
+    <string name="local_model_status_not_downloaded">未下载</string>
+    <string name="local_model_status_downloading">下载中</string>
+    <string name="local_model_status_verifying">校验中…</string>
+    <string name="local_model_status_ready">已就绪 · %1$s</string>
+    <string name="local_model_progress">%1$d%% · %2$d / %3$d MB</string>
+    <string name="local_model_download">下载</string>
+    <string name="local_model_resume">继续下载</string>
+    <string name="local_model_cancel">取消</string>
+    <string name="local_model_delete">删除模型</string>
+    <string name="local_model_enable">启用本地离线翻译</string>
+    <string name="local_model_enable_desc">关闭后主界面的服务商列表里不显示本地模型</string>
+    <string name="local_model_delete_title">删除本地模型</string>
+    <string name="local_model_delete_message">将删除已下载的模型文件（约 %1$s），需要时可以重新下载。</string>
+    <string name="local_model_delete_confirm">删除</string>
 </resources>
