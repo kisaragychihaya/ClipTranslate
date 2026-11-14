@@ -1,0 +1,824 @@
+diff --git a/ggml/src/ggml-hexagon/CMakeLists.txt b/ggml/src/ggml-hexagon/CMakeLists.txt
+index fea5770..fc2de6a 100644
+--- a/ggml/src/ggml-hexagon/CMakeLists.txt
++++ b/ggml/src/ggml-hexagon/CMakeLists.txt
+@@ -5,41 +5,35 @@ if (NOT IS_DIRECTORY "${HEXAGON_SDK_ROOT}")
+     message(FATAL_ERROR "Make sure HEXAGON_SDK_ROOT point to the correct Hexagon SDK installation.")
+ endif()
+ 
+-if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
+-    message("Try to read HEXAGON_TOOLS_ROOT from hexagon_sdk.json")
+-    file(READ "${HEXAGON_SDK_ROOT}/hexagon_sdk.json" HEXAGON_SDK_CONFIG_PATH)
+-    string(JSON HEXAGON_TOOLS_PATH GET ${HEXAGON_SDK_CONFIG_PATH} "root" "tools" "info" 0 "path")
+-    message("Found HEXAGON_TOOLS_PATH: ${HEXAGON_TOOLS_PATH}")
+-    set(HEXAGON_TOOLS_ROOT "${HEXAGON_SDK_ROOT}/${HEXAGON_TOOLS_PATH}")
+-    file(TO_CMAKE_PATH "${HEXAGON_TOOLS_ROOT}" HEXAGON_TOOLS_ROOT)
+-    if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
+-        message(FATAL_ERROR "Make sure HEXAGON_TOOLS_ROOT point to the correct Hexagon SDK installation.")
+-    endif()
+-endif()
++# ClipTranslate patch: no skel build, so neither the DSP toolchain nor the SDK
++# cmake helpers are needed. Only host headers from the SDK are used,
++# HEXAGON_SDK_ROOT points to third_party/hexagon-sdk-lite.
+ 
+-message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} and ${HEXAGON_TOOLS_ROOT} for building libggml-htp skels")
++message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} (host headers only, prebuilt skels)")
+ 
+-include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)
+-include(ExternalProject)
+-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+ 
+ option(GGML_HEXAGON_HTP_DEBUG  "ggml-hexagon: enable HTP debug output" OFF)
+ set(GGML_HEXAGON_HTP_BUILD_TYPE "Release" CACHE STRING "ggml-hexagon: HTP skel build type (Release, RelWithDebInfo, Debug)")
+ set(GGML_HEXAGON_HTP_CERT  "$ENV{HEXAGON_HTP_CERT}" CACHE PATH "ggml-hexagon: enable HTP library signing using certificate")
+ 
+ add_library(htp_iface OBJECT
+-    ${CMAKE_CURRENT_BINARY_DIR}/htp_iface_stub.c)
++    ${CMAKE_CURRENT_SOURCE_DIR}/htp-idl/htp_iface_stub.c)
+ 
+ set_target_properties(htp_iface PROPERTIES POSITION_INDEPENDENT_CODE ON)
+ target_include_directories(htp_iface PUBLIC
+     ${HEXAGON_SDK_ROOT}/incs
+     ${HEXAGON_SDK_ROOT}/utils/examples
+     ${CMAKE_CURRENT_SOURCE_DIR}/htp
++    ${CMAKE_CURRENT_SOURCE_DIR}/htp-idl
+     ${CMAKE_CURRENT_BINARY_DIR})
+ target_include_directories(htp_iface PRIVATE
+     ${HEXAGON_SDK_ROOT}/incs/stddef)
+ 
+-build_idl(htp/htp_iface.idl htp_iface)
++# ClipTranslate patch: htp-idl/ holds the qaic output for htp/htp_iface.idl, committed
++# because qaic is part of the DSP SDK and CI has no DSP SDK. Regenerate it with
++#   qaic -mdll -o ggml/src/ggml-hexagon/htp-idl -I$HEXAGON_SDK_ROOT/incs \
++#        -I$HEXAGON_SDK_ROOT/incs/stddef ggml/src/ggml-hexagon/htp/htp_iface.idl
++# whenever the idl file changes.
+ 
+ if (CMAKE_SYSTEM_NAME MATCHES Android)
+     target_link_options(htp_iface PUBLIC -llog -ldl)
+@@ -75,61 +69,7 @@ target_link_libraries(${TARGET_NAME} PRIVATE htp_iface)
+ target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/htp ${CMAKE_CURRENT_BINARY_DIR})
+ target_include_directories(${TARGET_NAME} SYSTEM PRIVATE ${HEXAGON_SDK_ROOT}/incs/stddef)
+ 
+-# Build HTP skels
+-set(HTP_SKELS)
+-set(HTP_PROJECTS)
+-function(build_htp_skel V)
+-    ExternalProject_Add(htp-${V}
+-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/htp BUILD_ALWAYS ON
+-        CMAKE_ARGS
+-            -DCMAKE_BUILD_TYPE=${GGML_HEXAGON_HTP_BUILD_TYPE}
+-            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/htp/cmake-toolchain.cmake
+-            -DCMAKE_INSTALL_LIBDIR=${CMAKE_CURRENT_BINARY_DIR}
+-            -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_ROOT}
+-            -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_ROOT}
+-            -DHEXAGON_HTP_DEBUG=${GGML_HEXAGON_HTP_DEBUG}
+-            -DDSP_VERSION=${V}
+-            -DPython3_EXECUTABLE=${Python3_EXECUTABLE}
+-            -DPREBUILT_LIB_DIR="toolv21_${V}")
+-    list(APPEND HTP_SKELS ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp-${V}.so)
+-    list(APPEND HTP_PROJECTS htp-${V})
+-    set(HTP_SKELS ${HTP_SKELS} PARENT_SCOPE)
+-    set(HTP_PROJECTS ${HTP_PROJECTS} PARENT_SCOPE)
+-endfunction()
+-
+-build_htp_skel(v73)
+-build_htp_skel(v75)
+-build_htp_skel(v79)
+-build_htp_skel(v81)
+-build_htp_skel(v85)
+-
+-# Install Hexagon skels required at runtime
+-install(FILES ${HTP_SKELS} TYPE LIB)
+-
+-if (CMAKE_SYSTEM_NAME MATCHES Windows AND GGML_HEXAGON_HTP_CERT)
+-    file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/arm64"      WINSDK_BIN0_ARM64)
+-    file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/x86"        WINSDK_BIN0_X86)
+-    file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/arm64" WINSDK_BIN1_ARM64)
+-    file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/x86"   WINSDK_BIN1_X86)
+-
+-    set(WINSDK_PATHS ${WINSDK_BIN0_ARM64} ${WINSDK_BIN0_X86} ${WINSDK_BIN1_ARM64} ${WINSDK_BIN1_X86})
++# ClipTranslate patch: the HTP skels (libggml-htp-vXX.so) and their install/signing steps
++# are removed. CI has no Hexagon DSP toolchain, so the skels are prebuilt and shipped in
++# the app assets instead (see tools/qc and third_party/htp-skel).
+ 
+-    find_program(INF2CAT  NAMES inf2cat.exe  PATHS ${WINSDK_PATHS} REQUIRED)
+-    find_program(SIGNTOOL NAMES signtool.exe PATHS ${WINSDK_PATHS} REQUIRED)
+-
+-    message(STATUS "hexagon: using ${GGML_HEXAGON_HTP_CERT} to sign libggml-htp skels")
+-
+-    set(LIBGGML_HTP_CAT ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp.cat)
+-    add_custom_target(libggml-htp-cat
+-        BYPRODUCTS ${LIBGGML_HTP_CAT}
+-        DEPENDS libggml-htp.inf ${HTP_PROJECTS}
+-        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/libggml-htp.inf ${CMAKE_CURRENT_BINARY_DIR}
+-        COMMAND ${INF2CAT} /driver:${CMAKE_CURRENT_BINARY_DIR} /os:10_25H2_ARM64
+-        COMMAND ${SIGNTOOL} sign /fd sha256 /f ${GGML_HEXAGON_HTP_CERT} ${LIBGGML_HTP_CAT}
+-        COMMENT "generating and signing libggml-htp.cat file"
+-        VERBATIM
+-    )
+-
+-    add_dependencies(${TARGET_NAME} libggml-htp-cat)
+-    install(FILES ${LIBGGML_HTP_CAT} TYPE LIB)
+-endif()
+diff --git a/ggml/src/ggml-hexagon/htp-idl/htp_iface.h b/ggml/src/ggml-hexagon/htp-idl/htp_iface.h
+new file mode 100644
+index 0000000..4c506be
+--- /dev/null
++++ b/ggml/src/ggml-hexagon/htp-idl/htp_iface.h
+@@ -0,0 +1,273 @@
++#ifndef _HTP_IFACE_H
++#define _HTP_IFACE_H
++#include <AEEStdDef.h>
++#include <remote.h>
++#include <string.h>
++#include <stdlib.h>
++
++
++#ifndef __QAIC_HEADER
++#define __QAIC_HEADER(ff) ff
++#endif //__QAIC_HEADER
++
++#ifndef __QAIC_HEADER_EXPORT
++#define __QAIC_HEADER_EXPORT
++#endif // __QAIC_HEADER_EXPORT
++
++#ifndef __QAIC_HEADER_ATTRIBUTE
++#define __QAIC_HEADER_ATTRIBUTE
++#endif // __QAIC_HEADER_ATTRIBUTE
++
++#ifndef __QAIC_IMPL
++#define __QAIC_IMPL(ff) ff
++#endif //__QAIC_IMPL
++
++#ifndef __QAIC_IMPL_EXPORT
++#define __QAIC_IMPL_EXPORT
++#endif // __QAIC_IMPL_EXPORT
++
++#ifndef __QAIC_IMPL_ATTRIBUTE
++#define __QAIC_IMPL_ATTRIBUTE
++#endif // __QAIC_IMPL_ATTRIBUTE
++#ifndef _QAIC_ENV_H
++#define _QAIC_ENV_H
++
++#include <stdio.h>
++#ifdef _WIN32
++#include "qtest_stdlib.h"
++#else
++#define MALLOC malloc
++#define FREE free
++#endif
++
++#ifdef __GNUC__
++#ifdef __clang__
++#pragma GCC diagnostic ignored "-Wunknown-pragmas"
++#else
++#pragma GCC diagnostic ignored "-Wpragmas"
++#endif
++#pragma GCC diagnostic ignored "-Wuninitialized"
++#pragma GCC diagnostic ignored "-Wunused-parameter"
++#pragma GCC diagnostic ignored "-Wunused-function"
++#endif
++
++#ifndef _ATTRIBUTE_UNUSED
++
++#ifdef _WIN32
++#define _ATTRIBUTE_UNUSED
++#else
++#define _ATTRIBUTE_UNUSED __attribute__ ((unused))
++#endif
++
++#endif // _ATTRIBUTE_UNUSED
++
++#ifndef _ATTRIBUTE_VISIBILITY
++
++#ifdef _WIN32
++#define _ATTRIBUTE_VISIBILITY
++#else
++#define _ATTRIBUTE_VISIBILITY __attribute__ ((visibility("default")))
++#endif
++
++#endif // _ATTRIBUTE_VISIBILITY
++
++#ifndef __QAIC_REMOTE
++#define __QAIC_REMOTE(ff) ff
++#endif //__QAIC_REMOTE
++
++#ifndef __QAIC_HEADER
++#define __QAIC_HEADER(ff) ff
++#endif //__QAIC_HEADER
++
++#ifndef __QAIC_HEADER_EXPORT
++#define __QAIC_HEADER_EXPORT
++#endif // __QAIC_HEADER_EXPORT
++
++#ifndef __QAIC_HEADER_ATTRIBUTE
++#define __QAIC_HEADER_ATTRIBUTE
++#endif // __QAIC_HEADER_ATTRIBUTE
++
++#ifndef __QAIC_IMPL
++#define __QAIC_IMPL(ff) ff
++#endif //__QAIC_IMPL
++
++#ifndef __QAIC_IMPL_EXPORT
++#define __QAIC_IMPL_EXPORT
++#endif // __QAIC_IMPL_EXPORT
++
++#ifndef __QAIC_IMPL_ATTRIBUTE
++#define __QAIC_IMPL_ATTRIBUTE
++#endif // __QAIC_IMPL_ATTRIBUTE
++
++#ifndef __QAIC_STUB
++#define __QAIC_STUB(ff) ff
++#endif //__QAIC_STUB
++
++#ifndef __QAIC_STUB_EXPORT
++#define __QAIC_STUB_EXPORT
++#endif // __QAIC_STUB_EXPORT
++
++#ifndef __QAIC_STUB_ATTRIBUTE
++#define __QAIC_STUB_ATTRIBUTE
++#endif // __QAIC_STUB_ATTRIBUTE
++
++#ifndef __QAIC_SKEL
++#define __QAIC_SKEL(ff) ff
++#endif //__QAIC_SKEL__
++
++#ifndef __QAIC_SKEL_EXPORT
++#define __QAIC_SKEL_EXPORT
++#endif // __QAIC_SKEL_EXPORT
++
++#ifndef __QAIC_SKEL_ATTRIBUTE
++#define __QAIC_SKEL_ATTRIBUTE
++#endif // __QAIC_SKEL_ATTRIBUTE
++
++#ifdef __QAIC_DEBUG__
++   #ifndef __QAIC_DBG_PRINTF__
++   #include <stdio.h>
++   #define __QAIC_DBG_PRINTF__( ee ) do { printf ee ; } while(0)
++   #endif
++#else
++   #define __QAIC_DBG_PRINTF__( ee ) (void)0
++#endif
++
++
++#define _OFFSET(src, sof)  ((void*)(((char*)(src)) + (sof)))
++
++#define _COPY(dst, dof, src, sof, sz)  \
++   do {\
++         struct __copy { \
++            char ar[sz]; \
++         };\
++         *(struct __copy*)_OFFSET(dst, dof) = *(struct __copy*)_OFFSET(src, sof);\
++   } while (0)
++
++#define _COPYIF(dst, dof, src, sof, sz)  \
++   do {\
++      if(_OFFSET(dst, dof) != _OFFSET(src, sof)) {\
++         _COPY(dst, dof, src, sof, sz); \
++      } \
++   } while (0)
++
++_ATTRIBUTE_UNUSED
++static __inline void _qaic_memmove(void* dst, void* src, int size) {
++   int i = 0;
++   for(i = 0; i < size; ++i) {
++      ((char*)dst)[i] = ((char*)src)[i];
++   }
++}
++
++#define _MEMMOVEIF(dst, src, sz)  \
++   do {\
++      if(dst != src) {\
++         _qaic_memmove(dst, src, sz);\
++      } \
++   } while (0)
++
++
++#define _ASSIGN(dst, src, sof)  \
++   do {\
++      dst = OFFSET(src, sof); \
++   } while (0)
++
++#define _STD_STRLEN_IF(str) (str == 0 ? 0 : strlen(str))
++
++#include "AEEStdErr.h"
++
++#ifdef _WIN32
++#define _QAIC_FARF(level, msg, ...) (void)0
++#else
++#define _QAIC_FARF(level, msg, ...) \
++   do {\
++      if(0 == (HAP_debug_v2) ) {\
++         (void)0; \
++      } else { \
++         FARF(level, msg , ##__VA_ARGS__); \
++      } \
++   }while(0)
++#endif //_WIN32 for _QAIC_FARF
++
++#define _TRY(ee, func) \
++   do { \
++      if (AEE_SUCCESS != ((ee) = func)) {\
++         __QAIC_DBG_PRINTF__((__FILE__ ":%d:error:%d:%s\n", __LINE__, (int)(ee),#func));\
++         goto ee##bail;\
++      } \
++   } while (0)
++
++#define _TRY_FARF(ee, func) \
++   do { \
++      if (AEE_SUCCESS != ((ee) = func)) {\
++         goto ee##farf##bail;\
++      } \
++   } while (0)
++
++#define _QAIC_CATCH(exception) exception##bail: if (exception != AEE_SUCCESS)
++
++#define _CATCH_FARF(exception) exception##farf##bail: if (exception != AEE_SUCCESS)
++
++#define _QAIC_ASSERT(nErr, ff) _TRY(nErr, 0 == (ff) ? AEE_EBADPARM : AEE_SUCCESS)
++
++#ifdef __QAIC_DEBUG__
++#define _QAIC_ALLOCATE(nErr, pal, size, alignment, pv) _TRY(nErr, _allocator_alloc(pal, __FILE_LINE__, size, alignment, (void**)&pv));\
++                                                  _QAIC_ASSERT(nErr,pv || !(size))
++#else
++#define _QAIC_ALLOCATE(nErr, pal, size, alignment, pv) _TRY(nErr, _allocator_alloc(pal, 0, size, alignment, (void**)&pv));\
++                                                  _QAIC_ASSERT(nErr,pv || !(size))
++#endif
++
++
++#endif // _QAIC_ENV_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++typedef struct htp_iface_pmu_conf htp_iface_pmu_conf;
++struct htp_iface_pmu_conf {
++   uint32 events[8];
++};
++/**
++    * Opens the handle in the specified domain.  If this is the first
++    * handle, this creates the session.  Typically this means opening
++    * the device, aka open("/dev/adsprpc-smd"), then calling ioctl
++    * device APIs to create a PD on the DSP to execute our code in,
++    * then asking that PD to dlopen the .so and dlsym the skel function.
++    *
++    * @param uri, <interface>_URI"&_dom=aDSP"
++    *    <interface>_URI is a QAIC generated uri, or
++    *    "file:///<sofilename>?<interface>_skel_handle_invoke&_modver=1.0"
++    *    If the _dom parameter is not present, _dom=DEFAULT is assumed
++    *    but not forwarded.
++    *    Reserved uri keys:
++    *      [0]: first unamed argument is the skel invoke function
++    *      _dom: execution domain name, _dom=mDSP/aDSP/DEFAULT
++    *      _modver: module version, _modver=1.0
++    *      _*: any other key name starting with an _ is reserved
++    *    Unknown uri keys/values are forwarded as is.
++    * @param h, resulting handle
++    * @retval, 0 on success
++    */
++__QAIC_HEADER_EXPORT int __QAIC_HEADER(htp_iface_open)(const char* uri, remote_handle64* h) __QAIC_HEADER_ATTRIBUTE;
++/** 
++    * Closes a handle.  If this is the last handle to close, the session
++    * is closed as well, releasing all the allocated resources.
++
++    * @param h, the handle to close
++    * @retval, 0 on success, should always succeed
++    */
++__QAIC_HEADER_EXPORT int __QAIC_HEADER(htp_iface_close)(remote_handle64 h) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_start)(remote_handle64 _h, uint32 sess_id, uint64 dsp_queue_id, uint32 n_hvx, uint32 n_hmx, uint64 vtcm_size, uint64 max_vmem, uint32 power_mode) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_stop)(remote_handle64 _h) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_mmap)(remote_handle64 _h, uint32 fd, uint64 size) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_munmap)(remote_handle64 _h, uint32 fd) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_profiler)(remote_handle64 _h, uint32 mode, const htp_iface_pmu_conf* pmu) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_etm)(remote_handle64 _h, uint32 enable) __QAIC_HEADER_ATTRIBUTE;
++__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(htp_iface_hwinfo)(remote_handle64 _h, uint32* n_threads, uint32* n_hvx, uint32* n_hmx, uint64* vtcm_size) __QAIC_HEADER_ATTRIBUTE;
++#ifndef htp_iface_URI
++#define htp_iface_URI "file:///libhtp_iface_skel.so?htp_iface_skel_handle_invoke&_modver=1.0"
++#endif /*htp_iface_URI*/
++#ifdef __cplusplus
++}
++#endif
++#endif //_HTP_IFACE_H
+diff --git a/ggml/src/ggml-hexagon/htp-idl/htp_iface_stub.c b/ggml/src/ggml-hexagon/htp-idl/htp_iface_stub.c
+new file mode 100644
+index 0000000..4828d95
+--- /dev/null
++++ b/ggml/src/ggml-hexagon/htp-idl/htp_iface_stub.c
+@@ -0,0 +1,417 @@
++#ifndef _HTP_IFACE_STUB_H
++#define _HTP_IFACE_STUB_H
++#include "htp_iface.h"
++#include <string.h>
++#ifndef _WIN32
++#include "HAP_farf.h"
++#include <inttypes.h>
++#endif //_WIN32 for HAP_farf
++#ifndef _ALLOCATOR_H
++#define _ALLOCATOR_H
++
++#include <stdlib.h>
++#include <stdint.h>
++
++typedef struct _heap _heap;
++struct _heap {
++   _heap* pPrev;
++   const char* loc;
++   uint64_t buf;
++};
++
++typedef struct _allocator {
++   _heap* pheap;
++   uint8_t* stack;
++   uint8_t* stackEnd;
++   int nSize;
++} _allocator;
++
++_ATTRIBUTE_UNUSED
++static __inline int _heap_alloc(_heap** ppa, const char* loc, size_t size, void** ppbuf) {
++   _heap* pn = 0;
++   pn = MALLOC(size + sizeof(_heap) - sizeof(uint64_t));
++   if(pn != 0) {
++      pn->pPrev = *ppa;
++      pn->loc = loc;
++      *ppa = pn;
++      *ppbuf = (void*)&(pn->buf);
++      return 0;
++   } else {
++      return -1;
++   }
++}
++#define _ALIGN_SIZE(x, y) (((x) + (y-1)) & ~(y-1))
++
++_ATTRIBUTE_UNUSED
++static __inline int _allocator_alloc(_allocator* me,
++                                    const char* loc,
++                                    size_t size,
++                                    unsigned int al,
++                                    void** ppbuf) {
++   if(size < 0) {
++      return -1;
++   } else if (size == 0) {
++      *ppbuf = 0;
++      return 0;
++   }
++   if((_ALIGN_SIZE((uintptr_t)me->stackEnd, al) + size) < (uintptr_t)me->stack + (size_t)me->nSize) {
++      *ppbuf = (uint8_t*)_ALIGN_SIZE((uintptr_t)me->stackEnd, al);
++      me->stackEnd = (uint8_t*)_ALIGN_SIZE((uintptr_t)me->stackEnd, al) + size;
++      return 0;
++   } else {
++      return _heap_alloc(&me->pheap, loc, size, ppbuf);
++   }
++}
++
++_ATTRIBUTE_UNUSED
++static __inline void _allocator_deinit(_allocator* me) {
++   _heap* pa = me->pheap;
++   while(pa != 0) {
++      _heap* pn = pa;
++      const char* loc = pn->loc;
++      (void)loc;
++      pa = pn->pPrev;
++      FREE(pn);
++   }
++}
++
++_ATTRIBUTE_UNUSED
++static __inline void _allocator_init(_allocator* me, uint8_t* stack, int stackSize) {
++   me->stack =  stack;
++   me->stackEnd =  stack + stackSize;
++   me->nSize = stackSize;
++   me->pheap = 0;
++}
++
++
++#endif // _ALLOCATOR_H
++
++#ifndef SLIM_H
++#define SLIM_H
++
++#include <stdint.h>
++
++//a C data structure for the idl types that can be used to implement
++//static and dynamic language bindings fairly efficiently.
++//
++//the goal is to have a minimal ROM and RAM footprint and without
++//doing too many allocations.  A good way to package these things seemed
++//like the module boundary, so all the idls within  one module can share
++//all the type references.
++
++
++#define PARAMETER_IN       0x0
++#define PARAMETER_OUT      0x1
++#define PARAMETER_INOUT    0x2
++#define PARAMETER_ROUT     0x3
++#define PARAMETER_INROUT   0x4
++
++//the types that we get from idl
++#define TYPE_OBJECT             0x0
++#define TYPE_INTERFACE          0x1
++#define TYPE_PRIMITIVE          0x2
++#define TYPE_ENUM               0x3
++#define TYPE_STRING             0x4
++#define TYPE_WSTRING            0x5
++#define TYPE_STRUCTURE          0x6
++#define TYPE_UNION              0x7
++#define TYPE_ARRAY              0x8
++#define TYPE_SEQUENCE           0x9
++
++//these require the pack/unpack to recurse
++//so it's a hint to those languages that can optimize in cases where
++//recursion isn't necessary.
++#define TYPE_COMPLEX_STRUCTURE  (0x10 | TYPE_STRUCTURE)
++#define TYPE_COMPLEX_UNION      (0x10 | TYPE_UNION)
++#define TYPE_COMPLEX_ARRAY      (0x10 | TYPE_ARRAY)
++#define TYPE_COMPLEX_SEQUENCE   (0x10 | TYPE_SEQUENCE)
++
++
++typedef struct Type Type;
++
++#define INHERIT_TYPE\
++   int32_t nativeSize;                /*in the simple case its the same as wire size and alignment*/\
++   union {\
++      struct {\
++         const uintptr_t         p1;\
++         const uintptr_t         p2;\
++      } _cast;\
++      struct {\
++         uint32_t  iid;\
++         uint32_t  bNotNil;\
++      } object;\
++      struct {\
++         const Type  *arrayType;\
++         int32_t      nItems;\
++      } array;\
++      struct {\
++         const Type *seqType;\
++         int32_t      nMaxLen;\
++      } seqSimple; \
++      struct {\
++         uint32_t bFloating;\
++         uint32_t bSigned;\
++      } prim; \
++      const SequenceType* seqComplex;\
++      const UnionType  *unionType;\
++      const StructType *structType;\
++      int32_t         stringMaxLen;\
++      uint8_t        bInterfaceNotNil;\
++   } param;\
++   uint8_t    type;\
++   uint8_t    nativeAlignment\
++
++typedef struct UnionType UnionType;
++typedef struct StructType StructType;
++typedef struct SequenceType SequenceType;
++struct Type {
++   INHERIT_TYPE;
++};
++
++struct SequenceType {
++   const Type *         seqType;
++   uint32_t               nMaxLen;
++   uint32_t               inSize;
++   uint32_t               routSizePrimIn;
++   uint32_t               routSizePrimROut;
++};
++
++//byte offset from the start of the case values for
++//this unions case value array.  it MUST be aligned
++//at the alignment requrements for the descriptor
++//
++//if negative it means that the unions cases are
++//simple enumerators, so the value read from the descriptor
++//can be used directly to find the correct case
++typedef union CaseValuePtr CaseValuePtr;
++union CaseValuePtr {
++   const uint8_t*   value8s;
++   const uint16_t*  value16s;
++   const uint32_t*  value32s;
++   const uint64_t*  value64s;
++};
++
++//these are only used in complex cases
++//so I pulled them out of the type definition as references to make
++//the type smaller
++struct UnionType {
++   const Type           *descriptor;
++   uint32_t               nCases;
++   const CaseValuePtr   caseValues;
++   const Type * const   *cases;
++   int32_t               inSize;
++   int32_t               routSizePrimIn;
++   int32_t               routSizePrimROut;
++   uint8_t                inAlignment;
++   uint8_t                routAlignmentPrimIn;
++   uint8_t                routAlignmentPrimROut;
++   uint8_t                inCaseAlignment;
++   uint8_t                routCaseAlignmentPrimIn;
++   uint8_t                routCaseAlignmentPrimROut;
++   uint8_t                nativeCaseAlignment;
++   uint8_t              bDefaultCase;
++};
++
++struct StructType {
++   uint32_t               nMembers;
++   const Type * const   *members;
++   int32_t               inSize;
++   int32_t               routSizePrimIn;
++   int32_t               routSizePrimROut;
++   uint8_t                inAlignment;
++   uint8_t                routAlignmentPrimIn;
++   uint8_t                routAlignmentPrimROut;
++};
++
++typedef struct Parameter Parameter;
++struct Parameter {
++   INHERIT_TYPE;
++   uint8_t    mode;
++   uint8_t  bNotNil;
++};
++
++#define SLIM_IFPTR32(is32,is64) (sizeof(uintptr_t) == 4 ? (is32) : (is64))
++#define SLIM_SCALARS_IS_DYNAMIC(u) (((u) & 0x00ffffff) == 0x00ffffff)
++
++typedef struct Method Method;
++struct Method {
++   uint32_t                    uScalars;            //no method index
++   int32_t                     primInSize;
++   int32_t                     primROutSize;
++   int                         maxArgs;
++   int                         numParams;
++   const Parameter * const     *params;
++   uint8_t                       primInAlignment;
++   uint8_t                       primROutAlignment;
++};
++
++typedef struct Interface Interface;
++
++struct Interface {
++   int                            nMethods;
++   const Method  * const          *methodArray;
++   int                            nIIds;
++   const uint32_t                   *iids;
++   const uint16_t*                  methodStringArray;
++   const uint16_t*                  methodStrings;
++   const char*                    strings;
++};
++
++
++#endif //SLIM_H
++
++
++#ifndef _HTP_IFACE_SLIM_H
++#define _HTP_IFACE_SLIM_H
++#include <stdint.h>
++
++#ifndef __QAIC_SLIM
++#define __QAIC_SLIM(ff) ff
++#endif
++#ifndef __QAIC_SLIM_EXPORT
++#define __QAIC_SLIM_EXPORT
++#endif
++
++static const Type types[2];
++static const Type* const typeArrays[1] = {&(types[0])};
++static const StructType structTypes[1] = {{0x1,&(typeArrays[0]),0x20,0x0,0x20,0x4,0x1,0x4}};
++static const Type types[2] = {{0x20,{{(const uintptr_t)&(types[1]),(const uintptr_t)0x8}}, 8,0x4},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4}};
++static const Parameter parameters[8] = {{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)0x0,0}}, 4,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,0,0},{0x8,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x8,0,0},{0x20,{{(const uintptr_t)&(structTypes[0]),0}}, 6,0x4,0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,3,0},{0x8,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x8,3,0}};
++static const Parameter* const parameterArrays[16] = {(&(parameters[3])),(&(parameters[4])),(&(parameters[3])),(&(parameters[3])),(&(parameters[4])),(&(parameters[4])),(&(parameters[3])),(&(parameters[6])),(&(parameters[6])),(&(parameters[6])),(&(parameters[7])),(&(parameters[3])),(&(parameters[5])),(&(parameters[0])),(&(parameters[1])),(&(parameters[2]))};
++static const Method methods[8] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[13])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[15])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x2c,0x0,13,7,(&(parameterArrays[0])),0x8,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x0,0x0),0x0,0x0,0,0,0,0x0,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x10,0x0,4,2,(&(parameterArrays[0])),0x8,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x4,0x0,1,1,(&(parameterArrays[0])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x24,0x0,2,2,(&(parameterArrays[11])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x1,0x0,0x0),0x0,0x18,4,4,(&(parameterArrays[7])),0x1,0x8}};
++static const Method* const methodArrays[9] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[4]),&(methods[5]),&(methods[6]),&(methods[5]),&(methods[7])};
++static const char strings[155] = "dsp_queue_id\0power_mode\0n_threads\0vtcm_size\0profiler\0max_vmem\0sess_id\0hwinfo\0enable\0events\0munmap\0n_hmx\0n_hvx\0start\0close\0mmap\0stop\0open\0etm\0pmu\0uri\0fd\0h\0";
++static const uint16_t methodStrings[30] = {110,62,0,104,98,34,53,13,70,24,104,98,34,44,19,141,84,122,149,39,132,145,152,137,77,91,149,116,152,127};
++static const uint16_t methodStringsArrays[9] = {20,27,0,29,17,25,13,23,8};
++__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(htp_iface_slim) = {9,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
++#endif //_HTP_IFACE_SLIM_H
++
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++__QAIC_STUB_EXPORT int __QAIC_STUB(htp_iface_open)(const char* uri, remote_handle64* h) __QAIC_STUB_ATTRIBUTE {
++   return __QAIC_REMOTE(remote_handle64_open)(uri, h);
++}
++__QAIC_STUB_EXPORT int __QAIC_STUB(htp_iface_close)(remote_handle64 h) __QAIC_STUB_ATTRIBUTE {
++   return __QAIC_REMOTE(remote_handle64_close)(h);
++}
++static __inline int _stub_method(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint64_t _in1[1], uint32_t _in2[1], uint32_t _in3[1], uint64_t _in4[1], uint64_t _in5[1], uint32_t _in6[1]) {
++   remote_arg _pra[1] = {0};
++   uint64_t _primIn[6]= {0};
++   int _nErr = 0;
++   _pra[0].buf.pv = (void*)_primIn;
++   _pra[0].buf.nLen = sizeof(_primIn);
++   _COPY(_primIn, 0, _in0, 0, 4);
++   _COPY(_primIn, 8, _in1, 0, 8);
++   _COPY(_primIn, 16, _in2, 0, 4);
++   _COPY(_primIn, 20, _in3, 0, 4);
++   _COPY(_primIn, 24, _in4, 0, 8);
++   _COPY(_primIn, 32, _in5, 0, 8);
++   _COPY(_primIn, 40, _in6, 0, 4);
++   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
++   _CATCH_FARF(_nErr) {
++      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
++   }
++   return _nErr;
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_start)(remote_handle64 _handle, uint32 sess_id, uint64 dsp_queue_id, uint32 n_hvx, uint32 n_hmx, uint64 vtcm_size, uint64 max_vmem, uint32 power_mode) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 2;
++   return _stub_method(_handle, _mid, (uint32_t*)&sess_id, (uint64_t*)&dsp_queue_id, (uint32_t*)&n_hvx, (uint32_t*)&n_hmx, (uint64_t*)&vtcm_size, (uint64_t*)&max_vmem, (uint32_t*)&power_mode);
++}
++static __inline int _stub_method_1(remote_handle64 _handle, uint32_t _mid) {
++   remote_arg* _pra = 0;
++   int _nErr = 0;
++   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 0, 0, 0, 0), _pra));
++   _CATCH_FARF(_nErr) {
++      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 0, 0, 0, 0), _mid, __func__);
++   }
++   return _nErr;
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_stop)(remote_handle64 _handle) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 3;
++   return _stub_method_1(_handle, _mid);
++}
++static __inline int _stub_method_2(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint64_t _in1[1]) {
++   remote_arg _pra[1] = {0};
++   uint64_t _primIn[2]= {0};
++   int _nErr = 0;
++   _pra[0].buf.pv = (void*)_primIn;
++   _pra[0].buf.nLen = sizeof(_primIn);
++   _COPY(_primIn, 0, _in0, 0, 4);
++   _COPY(_primIn, 8, _in1, 0, 8);
++   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
++   _CATCH_FARF(_nErr) {
++      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
++   }
++   return _nErr;
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_mmap)(remote_handle64 _handle, uint32 fd, uint64 size) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 4;
++   return _stub_method_2(_handle, _mid, (uint32_t*)&fd, (uint64_t*)&size);
++}
++static __inline int _stub_method_3(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1]) {
++   remote_arg _pra[1] = {0};
++   uint32_t _primIn[1]= {0};
++   int _nErr = 0;
++   _pra[0].buf.pv = (void*)_primIn;
++   _pra[0].buf.nLen = sizeof(_primIn);
++   _COPY(_primIn, 0, _in0, 0, 4);
++   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
++   _CATCH_FARF(_nErr) {
++      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
++   }
++   return _nErr;
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_munmap)(remote_handle64 _handle, uint32 fd) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 5;
++   return _stub_method_3(_handle, _mid, (uint32_t*)&fd);
++}
++static __inline int _stub_method_4(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint32_t _in1[8]) {
++   remote_arg _pra[1] = {0};
++   uint32_t _primIn[9]= {0};
++   int _nErr = 0;
++   _pra[0].buf.pv = (void*)_primIn;
++   _pra[0].buf.nLen = sizeof(_primIn);
++   _COPY(_primIn, 0, _in0, 0, 4);
++   _COPY(_primIn, 4, _in1, 0, 32);
++   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
++   _CATCH_FARF(_nErr) {
++      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
++   }
++   return _nErr;
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_profiler)(remote_handle64 _handle, uint32 mode, const htp_iface_pmu_conf* pmu) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 6;
++   return _stub_method_4(_handle, _mid, (uint32_t*)&mode, (uint32_t*)pmu);
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_etm)(remote_handle64 _handle, uint32 enable) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 7;
++   return _stub_method_3(_handle, _mid, (uint32_t*)&enable);
++}
++static __inline int _stub_method_5(remote_handle64 _handle, uint32_t _mid, uint32_t _rout0[1], uint32_t _rout1[1], uint32_t _rout2[1], uint64_t _rout3[1]) {
++   int _numIn[1] = {0};
++   remote_arg _pra[1] = {0};
++   uint64_t _primROut[3]= {0};
++   int _nErr = 0;
++   _numIn[0] = 0;
++   _pra[(_numIn[0] + 0)].buf.pv = (void*)_primROut;
++   _pra[(_numIn[0] + 0)].buf.nLen = sizeof(_primROut);
++   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 0, 1, 0, 0), _pra));
++   _COPY(_rout0, 0, _primROut, 0, 4);
++   _COPY(_rout1, 0, _primROut, 4, 4);
++   _COPY(_rout2, 0, _primROut, 8, 4);
++   _COPY(_rout3, 0, _primROut, 16, 8);
++   _CATCH_FARF(_nErr) {
++      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 0, 1, 0, 0), _mid, __func__);
++   }
++   return _nErr;
++}
++__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(htp_iface_hwinfo)(remote_handle64 _handle, uint32* n_threads, uint32* n_hvx, uint32* n_hmx, uint64* vtcm_size) __QAIC_STUB_ATTRIBUTE {
++   uint32_t _mid = 8;
++   return _stub_method_5(_handle, _mid, (uint32_t*)n_threads, (uint32_t*)n_hvx, (uint32_t*)n_hmx, (uint64_t*)vtcm_size);
++}
++#ifdef __cplusplus
++}
++#endif
++#endif //_HTP_IFACE_STUB_H

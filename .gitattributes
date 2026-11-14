@@ -2,3 +2,7 @@
 *.bat text eol=crlf
 *.sh text eol=lf
 gradlew text eol=lf
+
+# 补丁文件必须保持 LF：git apply 对行尾敏感（Windows 上 core.autocrlf 默认会把
+# 工作副本转成 CRLF，打补丁时会因为行尾不一致整份拒绝）
+*.patch text eol=lf

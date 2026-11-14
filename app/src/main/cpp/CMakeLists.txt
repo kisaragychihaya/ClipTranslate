@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.22.1)
 
 # libcliptranslate_jni.so = JNI 桥 + 静态链进去的 llama.cpp。
-# backend 有两个，静态注册（GGML_BACKEND_DL=OFF）：CPU / OpenCL(Adreno)，
-# 具体用哪个由 cliptranslate_jni.cpp 按 Kotlin 传来的 gpuBackend 在运行时决定。
+# backend 有三个，静态注册（GGML_BACKEND_DL=OFF）：CPU / OpenCL(Adreno GPU) /
+# Hexagon(高通 NPU)，具体用哪个由 cliptranslate_jni.cpp 按 Kotlin 传来的 gpuBackend
+# 在运行时决定。
 # Vulkan 曾经接过，但 Adreno 830 的驱动在 createComputePipeline 上直接失败
 # （ErrorUnknown，整个进程被杀），是驱动 bug、没有通用解，所以整体移除了。
 #
@@ -22,6 +23,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # 就退回 CPU-only 版本，Kotlin 侧不需要跟着改。
 # ---------------------------------------------------------------------------
 option(CLIPTRANSLATE_GPU_OPENCL "编译 ggml 的 OpenCL backend（Adreno GPU）" ON)
+option(CLIPTRANSLATE_NPU_HEXAGON "编译 ggml 的 Hexagon backend（高通 NPU/HTP）" ON)
+
+# 仓库根目录（app/src/main/cpp 往上四级），后面引用 third_party/ 下的东西都从这里拼。
+get_filename_component(CLIPTRANSLATE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 
 # ---------------------------------------------------------------------------
 # llama.cpp
@@ -168,10 +173,57 @@ else()
     set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
 endif()
 
+# ---------------------------------------------------------------------------
+# Hexagon backend（高通 NPU / HTP）的前置条件
+#
+# ggml-hexagon 分两半：
+#   * 宿主侧（ggml-hexagon.cpp / htp-drv.cpp …）编进我们的 .so，靠 fastrpc 跟 DSP
+#     通信，只需要 SDK 的头文件；
+#   * DSP 侧 skel（libggml-htp-vXX.so）必须用 Hexagon SDK 的 DSP 工具链交叉编译，
+#     CI（ubuntu-latest）上没有、也不能装。
+#
+# 所以：
+#   1) 头文件用仓库里裁剪过的 third_party/hexagon-sdk-lite（只放 SDK 6.7.0.1 的
+#      incs/ 头文件，419 KB），HEXAGON_SDK_ROOT 直接指过去 —— CI 不装 SDK、
+#      workflow 也不用加环境变量；
+#   2) 用仓库内补丁把 llama.cpp 里“编 5 个 skel + install”整段摘掉，同时把
+#      htp_iface.idl 的 qaic 生成换成仓库里预生成好的 htp-idl/（SDK 6.7 的
+#      hexagon_fun.cmake 写死了 qaic//bin/qaic，Linux 下这个路径不存在）；
+#   3) skel 是已经编好的产物：third_party/htp-skel/libggml-htp-vXX.so。运行时由
+#      Kotlin 解压到 filesDir 再通过 GGML_HEXAGON_LIBHTP_DIR 告诉 native 侧。
+#      skel 必须是有真实路径的独立文件（fastrpc 拿文件路径去加载，AGP 打包的
+#      jniLibs 是从 APK 里 mmap 的，没有可读路径），所以不能放 jniLibs。
+# ---------------------------------------------------------------------------
+set(_llama_patch_args "")
+if(CLIPTRANSLATE_NPU_HEXAGON)
+    set(HEXAGON_SDK_ROOT "${CLIPTRANSLATE_ROOT}/third_party/hexagon-sdk-lite"
+            CACHE PATH "裁剪过的 Hexagon SDK 头文件（仓库内）" FORCE)
+    if(NOT EXISTS "${HEXAGON_SDK_ROOT}/incs/remote.h" OR
+       NOT EXISTS "${HEXAGON_SDK_ROOT}/incs/stddef/AEEStdDef.h")
+        message(FATAL_ERROR "third_party/hexagon-sdk-lite 不完整：缺 ${HEXAGON_SDK_ROOT}/incs/remote.h 或 incs/stddef/AEEStdDef.h")
+    endif()
+    set(_llama_patch "${CLIPTRANSLATE_ROOT}/third_party/patches/llama-hexagon-no-skel-build.patch")
+    set(_llama_patch_script "${CLIPTRANSLATE_ROOT}/third_party/patches/apply-llama-patch.cmake")
+    if(NOT EXISTS "${_llama_patch}" OR NOT EXISTS "${_llama_patch_script}")
+        message(FATAL_ERROR "缺补丁或打补丁脚本：${_llama_patch} / ${_llama_patch_script}")
+    endif()
+    # 走小脚本而不是直接 `git apply`：脚本里先反查一次，补丁已打过就跳过（复用旧
+    # build 目录时不至于整份失败），打失败时把 git 的 stderr 带出来。
+    set(_llama_patch_args
+            PATCH_COMMAND ${CMAKE_COMMAND}
+            "-DPATCH_FILE=${_llama_patch}"
+            -P "${_llama_patch_script}")
+    set(GGML_HEXAGON ON CACHE BOOL "" FORCE)
+    message(STATUS "Hexagon backend: ON（skel 取运行时解压的那些，CI 不编 DSP）")
+else()
+    set(GGML_HEXAGON OFF CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_Declare(
         llama_cpp
         URL https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_TAG}.tar.gz
         ${_fetch_extra}
+        ${_llama_patch_args}
 )
 FetchContent_MakeAvailable(llama_cpp)
 

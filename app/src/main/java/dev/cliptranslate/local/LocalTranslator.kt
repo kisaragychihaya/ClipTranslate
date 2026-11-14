@@ -78,7 +78,9 @@ class LocalTranslator private constructor(context: Context) {
             throw LocalTranslateException("本地模型文件不存在，请先在设置中下载")
         }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)
-        val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE, backend.value)
+        // NPU 需要 skel 库在真实文件路径上（fastrpc 按路径加载），先解压 assets 里的副本。
+        val skelDir = if (backend == GpuBackend.NPU) extractSkels() else ""
+        val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE, backend.value, skelDir)
         if (loaded == 0L) {
             throw LocalTranslateException(loadFailureMessage(backend))
         }
@@ -87,10 +89,33 @@ class LocalTranslator private constructor(context: Context) {
         return loaded
     }
 
-    /** 显式选了 GPU 后端还加载失败，多半是该后端在这台机器上不可用，提示换一种方式。 */
+    /**
+     * 把 assets/htp-skel/ 里的 5 个 DSP skel 库解压到 filesDir/htp-skel/（仅在选 NPU 时做）。
+     * 已存在且大小一致就跳过，返回目录绝对路径。
+     */
+    private fun extractSkels(): String {
+        val dir = java.io.File(appContext.filesDir, "htp-skel")
+        dir.mkdirs()
+        val names = appContext.assets.list("htp-skel").orEmpty()
+        if (names.isEmpty()) {
+            throw LocalTranslateException("安装包未内置 NPU skel 库（assets/htp-skel 缺失）")
+        }
+        for (name in names) {
+            val target = java.io.File(dir, name)
+            appContext.assets.open("htp-skel/$name").use { input ->
+                val bytes = input.readBytes()
+                if (!target.exists() || target.length() != bytes.size.toLong()) {
+                    target.writeBytes(bytes)
+                }
+            }
+        }
+        return dir.absolutePath
+    }
+
+    /** 显式选了 GPU/NPU 后端还加载失败，多半是该后端在这台机器上不可用，提示换一种方式。 */
     private fun loadFailureMessage(backend: GpuBackend): String = when (backend) {
-        GpuBackend.OPENCL ->
-            "所选 GPU 后端不可用，请切换加速方式或改用 CPU"
+        GpuBackend.OPENCL, GpuBackend.NPU ->
+            "所选后端不可用，请切换加速方式或改用 CPU"
 
         else -> "本地模型加载失败（内存不足或模型文件损坏）"
     }

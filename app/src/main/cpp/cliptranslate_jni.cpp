@@ -12,13 +12,20 @@
 // from llama_model_default_params()/llama_context_default_params() and only the
 // fields we care about are overwritten.
 //
-// Backends: CPU and OpenCL are both statically registered by ggml (see
-// CMakeLists.txt), so llama_backend_init() already exposes every device. Which
-// one a load uses is decided here from the `gpuBackend` argument, via
-// llama_model_params.devices (the same field llama-server's --device uses) plus
-// n_gpu_layers. There is no CPU fallback for an explicit OpenCL request: a
+// Backends: CPU, OpenCL and Hexagon(NPU/HTP) are all statically registered by
+// ggml (see CMakeLists.txt), so llama_backend_init() already exposes every
+// device. Which one a load uses is decided here from the `gpuBackend` argument,
+// via llama_model_params.devices (the same field llama-server's --device uses)
+// plus n_gpu_layers. There is no CPU fallback for an explicit backend request: a
 // missing device makes nativeLoad() return 0 so Kotlin can show a readable
 // message instead of silently running 10x slower.
+//
+// Hexagon needs its DSP-side skel (libggml-htp-vXX.so) on a real filesystem path:
+// AGP-packed jniLibs are mmap'ed straight out of the APK, which fastrpc cannot
+// load. Kotlin extracts the skels from assets/htp-skel into filesDir and passes
+// that directory as `skelDir`; we hand it to ggml-hexagon through the
+// GGML_HEXAGON_LIBHTP_DIR env var (read by htp_lib_dir() in htp-drv.cpp) before
+// llama_backend_init(), because backend registration runs htpdrv_init().
 //
 // Vulkan used to be a third backend. It is gone: the Adreno 830 driver fails
 // createComputePipeline() on ggml's basic mul_mat_vec_q4_k shaders with
@@ -32,6 +39,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <mutex>
@@ -54,6 +62,7 @@ constexpr int32_t kNBatch = 512;
 constexpr int32_t kGpuAuto = 0;      // GPU 优先（OpenCL），GPU 装载失败时自动回落 CPU
 constexpr int32_t kGpuCpuOnly = 1;   // 只用 CPU
 constexpr int32_t kGpuOpenCl = 2;    // 强制 OpenCL（Adreno）
+constexpr int32_t kGpuHexagon = 4;   // 强制 Hexagon（高通 NPU / HTP）
 
 /** 曾经是「强制 Vulkan」（3）；Vulkan 后端已从构建里移除，这里只留个记号做防御。 */
 constexpr int32_t kGpuVulkanRemoved = 3;
@@ -316,13 +325,19 @@ bool is_gpu_device(ggml_backend_dev_t dev) {
     return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
-/** 后端注册名（"OpenCL"）或设备名里含 want 就算匹配。 */
+/**
+ * 后端注册名（"OpenCL" / "HTP"）、设备名（"HTP0"）、设备描述（"Hexagon"）
+ * 任一处含 want 就算匹配。
+ */
 bool device_matches(ggml_backend_dev_t dev, const char * want) {
     ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
     if (reg != nullptr && contains_ci(ggml_backend_reg_name(reg), want)) {
         return true;
     }
-    return contains_ci(ggml_backend_dev_name(dev), want);
+    if (contains_ci(ggml_backend_dev_name(dev), want)) {
+        return true;
+    }
+    return contains_ci(ggml_backend_dev_description(dev), want);
 }
 
 /** 把 ggml 注册进来的 backend 设备全打一遍：真机上定位“为什么走了 CPU”全靠这行。 */
@@ -348,24 +363,50 @@ void log_devices() {
 /**
  * 按 gpuBackend 选一个 GPU 设备。
  *
- * 现在构建里只有 OpenCL 一个 GPU 后端，所以 auto 就是“取第一块 OpenCL GPU”；
- * 匹配仍然按后端注册名（"OpenCL"）/ 设备名走，将来再挂别的 GPU 后端时这里不用改
- * 也能退化到“任意一块 GPU”。
+ * 构建里有 OpenCL（Adreno GPU）和 Hexagon（高通 NPU，注册名 "HTP"、设备描述
+ * "Hexagon"）两个 GPU 类后端。显式指定后端时按后端注册名/设备名/描述匹配；
+ * Hexagon 同时匹配 "htp" 和 "hexagon"（上游注册名是 "HTP"、设备描述才是
+ * "Hexagon"，两个词都不算错）。
+ *
+ * auto 明确排除 Hexagon：NPU 在 llama.cpp 里仍是实验后端，用户没选就不该悄悄
+ * 跑上去（ggml 的注册顺序是 OpenCL 在前，但 OpenCL 注册失败时顺序就变了，
+ * 这里不依赖顺序）。auto 只在连 OpenCL 都没有时才退到任意 GPU。
+ *
  * 不把 devices 留空交给 llama 自己挑，是因为 llama 只按 props.device_id 去重，
  * 而 OpenCL backend 根本不填 device_id，留空万一将来多挂一个后端就会把同一块
  * GPU 当成两台设备、把层切开来跑（两边各自建一份 buffer，更慢也更吃内存）。
  */
 ggml_backend_dev_t pick_device(int32_t gpu_backend) {
-    const char * want = gpu_backend == kGpuOpenCl ? "opencl" : nullptr;
+    const bool want_opencl = gpu_backend == kGpuOpenCl;
+    const bool want_hexagon = gpu_backend == kGpuHexagon;
     const size_t count = ggml_backend_dev_count();
-    // auto：先找 OpenCL GPU，找不到再退回任意 GPU。
+    auto is_hexagon = [](ggml_backend_dev_t dev) {
+        return device_matches(dev, "htp") || device_matches(dev, "hexagon");
+    };
+    // 第一轮：显式后端按名字匹配，auto 取任意一块非 Hexagon 的 GPU。
     for (size_t i = 0; i < count; ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         if (dev == nullptr || !is_gpu_device(dev)) {
             continue;
         }
-        if (want == nullptr || device_matches(dev, want)) {
-            return dev;
+        if (want_opencl && !device_matches(dev, "opencl")) {
+            continue;
+        }
+        if (want_hexagon && !is_hexagon(dev)) {
+            continue;
+        }
+        if (!want_hexagon && is_hexagon(dev)) {
+            continue;
+        }
+        return dev;
+    }
+    if (!want_opencl && !want_hexagon) {
+        // auto：没有 OpenCL/别的 GPU，才接受 Hexagon。
+        for (size_t i = 0; i < count; ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (dev != nullptr && is_gpu_device(dev)) {
+                return dev;
+            }
         }
     }
     return nullptr;
@@ -378,7 +419,7 @@ extern "C" {
 JNIEXPORT jlong JNICALL
 Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
         JNIEnv * env, jobject /* thiz */, jstring model_path, jint n_threads, jint n_ctx,
-        jint gpu_backend) {
+        jint gpu_backend, jstring skel_dir) {
     // 契约：失败返回 0，绝不抛（Kotlin 侧只判断 == 0，抛出去会击穿协程）。
     if (model_path == nullptr) {
         LOGE("nativeLoad: model_path is null");
@@ -393,25 +434,48 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
 
     try {
         const std::string path = from_jstring(env, model_path);
-        LOGI("nativeLoad: path=%s n_threads=%d n_ctx=%d gpu_backend=%d", path.c_str(),
-             (int) n_threads, (int) n_ctx, (int) gpu_backend);
-
-        // 必须先 init：静态构建里两个 backend（CPU/OpenCL）由
-        // ggml_backend_load_all() 一次性注册进来，探测失败的 backend 不会注册设备。
-        llama_backend_init();
-        llama_log_set(llama_log_to_logcat, nullptr);
-        log_devices();
+        const std::string skel_path = skel_dir != nullptr ? from_jstring(env, skel_dir) : std::string();
+        LOGI("nativeLoad: path=%s n_threads=%d n_ctx=%d gpu_backend=%d skel_dir=%s", path.c_str(),
+             (int) n_threads, (int) n_ctx, (int) gpu_backend,
+             skel_path.empty() ? "<none>" : skel_path.c_str());
 
         // 防御：Kotlin 侧已删掉 Vulkan 枚举（3），但历史设置里可能还留着这个值；
         // 其他未知值同理。一律按 auto 处理并打一行警告，不要因为脏数据让翻译不可用。
+        // 这一步必须在下面的 setenv 之前做完：脏数据不该影响环境变量。
         if (gpu_backend == kGpuVulkanRemoved) {
             LOGW("nativeLoad: gpu_backend=3 (Vulkan) no longer exists, treating as auto");
             gpu_backend = kGpuAuto;
         } else if (gpu_backend != kGpuAuto && gpu_backend != kGpuCpuOnly &&
-                   gpu_backend != kGpuOpenCl) {
+                   gpu_backend != kGpuOpenCl && gpu_backend != kGpuHexagon) {
             LOGW("nativeLoad: unknown gpu_backend=%d, treating as auto", (int) gpu_backend);
             gpu_backend = kGpuAuto;
         }
+
+        // Hexagon 的 skel 目录必须在 llama_backend_init() 之前交出去：
+        // llama_backend_init() -> ggml_backend_load_all() 会跑 ggml_backend_hexagon_reg()，
+        // 里面 htpdrv_init() 探测 DSP（不存在就整个后端不注册）。目录不对就没法加载，
+        // 显式要 NPU 却连目录都没给属于调用方错误，直接失败比悄悄退 CPU 好排查。
+        if (gpu_backend == kGpuHexagon) {
+            if (skel_path.empty()) {
+                LOGE("nativeLoad: gpu_backend=4 (Hexagon) but skel_dir is empty");
+                release_fields(session);
+                delete session;
+                return 0;
+            }
+            if (setenv("GGML_HEXAGON_LIBHTP_DIR", skel_path.c_str(), 1) != 0) {
+                LOGE("nativeLoad: setenv(GGML_HEXAGON_LIBHTP_DIR) failed");
+                release_fields(session);
+                delete session;
+                return 0;
+            }
+            LOGI("nativeLoad: GGML_HEXAGON_LIBHTP_DIR=%s", skel_path.c_str());
+        }
+
+        // 必须先 init：静态构建里三个 backend（CPU/OpenCL/Hexagon）由
+        // ggml_backend_load_all() 一次性注册进来，探测失败的 backend 不会注册设备。
+        llama_backend_init();
+        llama_log_set(llama_log_to_logcat, nullptr);
+        log_devices();
 
         llama_model_params model_params = llama_model_default_params();
         model_params.n_gpu_layers = 0;  // 默认 CPU，下面按 gpu_backend 覆盖
@@ -426,10 +490,11 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
         } else {
             const ggml_backend_dev_t dev = pick_device(gpu_backend);
             if (dev == nullptr) {
-                if (gpu_backend == kGpuOpenCl) {
-                    // 用户显式指定了 OpenCL 却没有对应设备（驱动不支持 / 后端没编进来）：
-                    // 老实失败，让 Kotlin 给出可读提示，别悄悄退到 CPU 装作成功。
-                    LOGE("nativeLoad: no OpenCL device registered (gpu_backend=%d)",
+                if (gpu_backend != kGpuAuto) {
+                    // 用户显式指定了后端却没有对应设备（驱动不支持 / 后端没编进来 /
+                    // skel 目录不对）：老实失败，让 Kotlin 给出可读提示，别悄悄退到
+                    // CPU 装作成功。
+                    LOGE("nativeLoad: no device for requested backend (gpu_backend=%d)",
                          (int) gpu_backend);
                     release_fields(session);
                     delete session;

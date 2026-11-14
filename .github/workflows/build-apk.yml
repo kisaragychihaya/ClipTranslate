@@ -65,10 +65,29 @@ jobs:
               fi
             done
             echo "OK: 没有多余的系统库副本"
+            # NPU skel：必须是 assets/htp-skel/ 下的 5 个独立文件（运行时由 Kotlin 解压
+            # 到 filesDir，fastrpc 只认真实文件路径，jniLibs 是 APK 内 mmap 读不了）。
+            # 缺了只会让 NPU 选项不可用，不至于整个包不可用 —— 提示级。
+            missing=""
+            for v in 73 75 79 81 85; do
+              if ! unzip -l "$apk" | grep -q "assets/htp-skel/libggml-htp-v${v}\.so"; then
+                missing="$missing v${v}"
+              fi
+            done
+            if [ -n "$missing" ]; then
+              echo "::warning::$apk 的 assets/htp-skel/ 里缺 skel:${missing}（NPU 会不可用）"
+            else
+              echo "OK: assets/htp-skel/ 5 个 skel 都在"
+            fi
+            if unzip -l "$apk" | grep -qE "lib/arm64-v8a/libggml-htp-"; then
+              echo "::error::$apk 把 skel 打成 jniLibs 了（fastrpc 无法从 APK 内加载，必须走 assets/htp-skel）"
+              exit 1
+            fi
+            echo "OK: skel 没被塞进 jniLibs"
             # 提示性检查：确认 OpenCL 后端真的被编进 .so 了（CMake 里若因为
             # find_package 没找到而静默关掉后端，这里能看出来）。不红，只警告。
             unzip -p "$apk" lib/arm64-v8a/libcliptranslate_jni.so > /tmp/cliptranslate_jni.so
-            for marker in "ggml_opencl:"; do
+            for marker in "ggml_opencl:" "ggml-hex:"; do
               if strings /tmp/cliptranslate_jni.so | grep -q "$marker"; then
                 echo "OK: backend marker ${marker}"
               else

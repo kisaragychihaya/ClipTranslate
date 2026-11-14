@@ -15,6 +15,9 @@ enum class GpuBackend(val value: Int) {
 
     /** 2：强制 OpenCL（Adreno）。 */
     OPENCL(2),
+
+    /** 4：强制 Hexagon NPU（HTP）。3 曾是 Vulkan，已移除，故从 4 继续编号。 */
+    NPU(4),
     ;
 
     companion object {

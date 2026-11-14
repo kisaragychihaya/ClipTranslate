@@ -20,6 +20,15 @@
             android:name="libOpenCL.so"
             android:required="false" />
 
+        <!-- libcdsprpc.so 是 Qualcomm 的 fastrpc 用户态通道（ggml-hexagon 里按裸名
+             dlopen("libcdsprpc.so") 找它，见 htp-drv.cpp 的 drv_path）。它在设备
+             /vendor/lib64 下且已登记在 vendor 公共库清单里，但 Android 12+ 应用命名
+             空间默认看不到 vendor 库，必须在这里声明才会被加进搜索路径。
+             required=false：非高通设备没有这个库，装上也要能用（只是 NPU 选不了）。 -->
+        <uses-native-library
+            android:name="libcdsprpc.so"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
