@@ -173,6 +173,10 @@ endif()
 #   * find_package(SPIRV-Headers CONFIG REQUIRED)：ggml-vulkan-types.h 要
 #     <spirv/unified1/spirv.hpp>。CI 里 apt 装 spirv-headers；万一没有就自己拉一份头，
 #     并给 find_package(CONFIG) 造一个最小的 config 文件顶上。
+#   * ggml-vulkan-types.h 还要 <vulkan/vulkan.hpp>（Vulkan-Hpp，C++ 头），而 NDK 的
+#     sysroot 只有 C 头 vulkan.h / vulkan_core.h —— 所以另外 FetchContent 一份
+#     Khronos Vulkan-Headers，在 llama.cpp 的目标建好之后用 BEFORE 挂到 ggml-vulkan 上
+#     （vulkan.hpp 里 static_assert VK_HEADER_VERSION == 350，C 头必须同版本）。
 #   * shader 生成用 ExternalProject 把 vulkan-shaders-gen 用**宿主**编译器编出来
 #     （cmake/host-toolchain.cmake.in 自动探测宿主的 gcc/clang），然后对每个 .comp
 #     调一次 glslc 生成 .spv 并内嵌进库。这一步是纯 CPU 活，交叉编译不受影响，
@@ -241,6 +245,29 @@ if(ANDROID AND CLIPTRANSLATE_GPU_VULKAN)
         message(STATUS "SPIRV-Headers: 系统里没有，改用 FetchContent ${SPIRV_HEADERS_TAG}")
     endif()
 
+    # Vulkan-Hpp（C++ 头 vulkan/vulkan.hpp）：NDK r27 的 sysroot 只有 C 头
+    # vulkan.h / vulkan_core.h，没有 vulkan.hpp，而 ggml-vulkan-types.h 直接
+    # `#include <vulkan/vulkan.hpp>` 用 vk:: 命名空间，所以必须自己拉一份。
+    # 版本要和 SPIRV-Headers 同代，这里两个都用 vulkan-sdk-1.4.350.0
+    # （Vulkan-Headers 里这个 tag 确实存在，git ls-remote 核过）。
+    # 注意：vulkan.hpp 第 40 行有 `VULKAN_HPP_STATIC_ASSERT(VK_HEADER_VERSION == 350, ...)`，
+    # 所以 C 头也必须是这份 1.4.350 的，不能是 NDK 里那个旧版本 —— 下面的
+    # target_include_directories(... BEFORE ...) 就是为了抢在 NDK sysroot 前面。
+    set(VULKAN_HEADERS_TAG "vulkan-sdk-1.4.350.0" CACHE STRING "Khronos Vulkan-Headers release tag")
+    FetchContent_Declare(
+            vulkan_headers
+            URL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/${VULKAN_HEADERS_TAG}.tar.gz
+            ${_fetch_extra}
+    )
+    FetchContent_GetProperties(vulkan_headers)
+    if(NOT vulkan_headers_POPULATED)
+        FetchContent_Populate(vulkan_headers)
+    endif()
+    if(NOT EXISTS "${vulkan_headers_SOURCE_DIR}/include/vulkan/vulkan.hpp")
+        message(FATAL_ERROR "Vulkan-Headers 里没找到 include/vulkan/vulkan.hpp，检查 VULKAN_HEADERS_TAG")
+    endif()
+    message(STATUS "Vulkan-Hpp: ${vulkan_headers_SOURCE_DIR}/include (${VULKAN_HEADERS_TAG})")
+
     set(GGML_VULKAN ON CACHE BOOL "" FORCE)
 else()
     set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
@@ -252,6 +279,21 @@ FetchContent_Declare(
         ${_fetch_extra}
 )
 FetchContent_MakeAvailable(llama_cpp)
+
+# ---------------------------------------------------------------------------
+# Vulkan-Hpp 的 include 要等 ggml-vulkan 目标存在后再补，而且必须 BEFORE：
+# ggml-vulkan-types.h 先 include <vulkan/vulkan_core.h>、再 include <vulkan/vulkan.hpp>，
+# 两份头必须来自同一个版本（vulkan.hpp 里 static_assert VK_HEADER_VERSION == 350），
+# 所以要让 FetchContent 下来那份 1.4.350 抢在 NDK sysroot 的同名头前面。
+# ggml-vulkan 其余 vulkan 相关 include 只有这两个头（对着 b12375 源码 grep 过），
+# Vulkan-Headers 的 include/ 里都有（vulkan.h/.hpp/_core.h/funcs/structs/enums/handles
+# + vk_video/，vulkan.hpp 内部还要的 vulkan_*.hpp 也齐）。
+# ---------------------------------------------------------------------------
+if(TARGET ggml-vulkan)
+    if(DEFINED vulkan_headers_SOURCE_DIR)
+        target_include_directories(ggml-vulkan BEFORE PRIVATE "${vulkan_headers_SOURCE_DIR}/include")
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # JNI 库
