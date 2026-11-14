@@ -45,8 +45,6 @@ import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
-import top.yukonga.miuix.kmp.basic.DropdownEntry
-import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -60,8 +58,8 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Copy
 import top.yukonga.miuix.kmp.icon.extended.Settings
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
-import top.yukonga.miuix.kmp.menu.OverlayDropdownMenu
+import top.yukonga.miuix.kmp.extra.SuperDialog
+import top.yukonga.miuix.kmp.extra.SuperDropdown
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private const val QUICK_LANGUAGE_COUNT = 8
@@ -181,7 +179,7 @@ fun TranslateScreen(
             }
         }
 
-        // Overlay 系列弹层要放在 Scaffold 内部：popup 由 Scaffold 的 popupHost 托管。
+        // Super 系列弹层要放在 Scaffold 内部：popup 由 Scaffold 的 popupHost 托管。
         LanguageDialog(
             show = showAllLanguages,
             current = state.targetCode,
@@ -274,35 +272,32 @@ private fun ProviderSection(
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (state.providers.size > 1) {
-            OverlayDropdownMenu(
+            SuperDropdown(
+                items = state.providers.map { providerLabel(it.name, it.baseUrl) },
+                selectedIndex = state.providers
+                    .indexOfFirst { it.id == provider.id }
+                    .coerceAtLeast(0),
                 title = "服务商",
                 summary = providerLabel(provider.name, provider.baseUrl),
-                entry = DropdownEntry(
-                    items = state.providers.map { item ->
-                        DropdownItem(
-                            text = providerLabel(item.name, item.baseUrl),
-                            selected = item.id == provider.id,
-                            onClick = { onSelectProvider(item.id) },
-                        )
-                    },
-                ),
                 insideMargin = PaddingValues(horizontal = 0.dp, vertical = 6.dp),
+                showValue = false,
+                onSelectedIndexChange = { index ->
+                    state.providers.getOrNull(index)?.id?.let(onSelectProvider)
+                },
             )
         }
-        OverlayDropdownMenu(
+        SuperDropdown(
+            items = provider.models.map { it.id },
+            selectedIndex = provider.models.indexOfFirst { it.id == state.effectiveModelId }
+                .coerceAtLeast(0),
             title = "模型",
             summary = state.effectiveModelId ?: "未选择模型",
-            entry = DropdownEntry(
-                items = provider.models.map { model ->
-                    DropdownItem(
-                        text = model.id,
-                        selected = model.id == state.effectiveModelId,
-                        onClick = { onSelectModel(model.id) },
-                    )
-                },
-            ),
             enabled = provider.models.isNotEmpty(),
             insideMargin = PaddingValues(horizontal = 0.dp, vertical = 6.dp),
+            showValue = false,
+            onSelectedIndexChange = { index ->
+                provider.models.getOrNull(index)?.id?.let(onSelectModel)
+            },
         )
         if (provider.models.isEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -359,7 +354,7 @@ private fun LanguageDialog(
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    OverlayDialog(
+    SuperDialog(
         show = show,
         title = "选择目标语言",
         onDismissRequest = onDismiss,

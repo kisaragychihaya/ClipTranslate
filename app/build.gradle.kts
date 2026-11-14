@@ -9,9 +9,9 @@ plugins {
 
 android {
     namespace = "dev.cliptranslate"
-    // miuix 0.9.x 的 aar 声明 minCompileSdk=37（compose 1.12.x 同样如此），AGP 的
-    // checkAarMetadata 会因此硬失败，compileSdk 必须是 37。targetSdk 保持 36，运行时行为不变。
-    compileSdk = 37
+    // miuix 0.8.8 的 aar 声明 minCompileSdk=36，与 CI（setup-android 只装 platforms;android-36）
+    // 以及 targetSdk = 36 对齐；AGP 的 checkAarMetadata 要求 compileSdk ≥ 36。
+    compileSdk = 36
 
     // 与 .github/workflows/build-apk.yml 里 setup-android 安装的 NDK 版本保持一致。
     // 27.3.13750724 是 ubuntu-24.04 runner 镜像自带的默认 NDK（ANDROID_NDK_ROOT 指向它），
@@ -116,8 +116,7 @@ dependencies {
 
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.miuix.ui)
-    implementation(libs.miuix.preference)
+    implementation(libs.miuix)
     implementation(libs.miuix.icons)
     implementation(libs.androidx.compose.ui.tooling.preview)
 

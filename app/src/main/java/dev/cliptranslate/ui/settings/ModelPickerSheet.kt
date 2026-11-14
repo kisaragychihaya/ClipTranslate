@@ -28,7 +28,7 @@ import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
@@ -44,7 +44,7 @@ fun ModelPickerSheet(
 ) {
     var selected by remember(models) { mutableStateOf(initiallySelected) }
 
-    OverlayBottomSheet(
+    SuperBottomSheet(
         show = true,
         title = "选择要添加的模型",
         onDismissRequest = onDismiss,

@@ -31,8 +31,6 @@ import java.util.Locale
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.DropdownEntry
-import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.FloatingActionButton
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
@@ -45,9 +43,9 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
-import top.yukonga.miuix.kmp.menu.OverlayDropdownMenu
-import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.extra.SuperDialog
+import top.yukonga.miuix.kmp.extra.SuperDropdown
+import top.yukonga.miuix.kmp.extra.SuperSwitch
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
@@ -151,9 +149,9 @@ fun SettingsScreen(
             }
         }
 
-        // Overlay 系列弹层/对话框都要放在 Scaffold 内部，才能被 Scaffold 的 popupHost 托管。
+        // Super 系列弹层/对话框都要放在 Scaffold 内部，才能被 Scaffold 的 popupHost 托管。
         pendingDelete?.let { target ->
-            OverlayDialog(
+            SuperDialog(
                 show = true,
                 title = "删除 Provider",
                 summary = "确定要删除「${target.name.ifBlank { "未命名 Provider" }}」吗？删除后需要重新配置。",
@@ -184,7 +182,7 @@ fun SettingsScreen(
         }
 
         if (pendingModelDelete) {
-            OverlayDialog(
+            SuperDialog(
                 show = true,
                 title = stringResource(R.string.local_model_delete_title),
                 summary = stringResource(
@@ -321,7 +319,7 @@ private fun LocalModelCard(
                 }
             }
 
-            SwitchPreference(
+            SuperSwitch(
                 title = stringResource(R.string.local_model_enable),
                 summary = stringResource(R.string.local_model_enable_desc),
                 checked = enabled,
@@ -331,19 +329,16 @@ private fun LocalModelCard(
 
             HorizontalDivider()
 
-            OverlayDropdownMenu(
+            SuperDropdown(
+                items = GpuBackend.entries.map { gpuBackendLabel(it) },
+                selectedIndex = GpuBackend.entries.indexOf(gpuBackend),
                 title = stringResource(R.string.local_model_gpu_backend),
                 summary = gpuBackendLabel(gpuBackend),
-                entry = DropdownEntry(
-                    items = GpuBackend.entries.map { backend ->
-                        DropdownItem(
-                            text = gpuBackendLabel(backend),
-                            selected = backend == gpuBackend,
-                            onClick = { onSelectGpuBackend(backend) },
-                        )
-                    },
-                ),
                 insideMargin = PaddingValues(horizontal = 0.dp, vertical = 6.dp),
+                showValue = false,
+                onSelectedIndexChange = { index ->
+                    GpuBackend.entries.getOrNull(index)?.let(onSelectGpuBackend)
+                },
             )
             Text(
                 text = stringResource(R.string.local_model_gpu_hint),

@@ -30,7 +30,7 @@ import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
-import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
+import top.yukonga.miuix.kmp.extra.SuperBottomSheet
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
@@ -60,7 +60,7 @@ fun ProviderEditorSheet(
     val canSave = trimmedName.isNotEmpty() && urlLooksValid
     val draft = provider.copy(name = trimmedName, baseUrl = trimmedUrl, apiKey = trimmedKey)
 
-    OverlayBottomSheet(
+    SuperBottomSheet(
         show = true,
         title = "Provider 配置",
         onDismissRequest = onDismiss,
@@ -158,7 +158,6 @@ fun ProviderEditorSheet(
                     TextButton(
                         text = if (showKey) "隐藏" else "显示",
                         onClick = { showKey = !showKey },
-                        textStyle = MiuixTheme.textStyles.footnote1,
                         insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     )
                 },
