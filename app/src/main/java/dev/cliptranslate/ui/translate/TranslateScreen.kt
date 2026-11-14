@@ -150,8 +150,10 @@ fun TranslateScreen(
                 colors = ButtonDefaults.buttonColorsPrimary(),
             ) {
                 if (state.isLoading) {
+                    // Miuix 的指示器用 size 参数自定尺寸（内部按它布局圆弧），
+                    // 用 Modifier.size 强改会把圆弧画偏（「翻译中」圆圈错位）。
                     CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
+                        size = 18.dp,
                         strokeWidth = 2.dp,
                         colors = ProgressIndicatorDefaults.progressIndicatorColors(
                             foregroundColor = MiuixTheme.colorScheme.onPrimary,
