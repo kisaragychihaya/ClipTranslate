@@ -79,7 +79,8 @@ class LocalTranslator private constructor(context: Context) {
         }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)
         // NPU 需要 skel 库在真实文件路径上（fastrpc 按路径加载），先解压 assets 里的副本。
-        val skelDir = if (backend == GpuBackend.NPU) extractSkels() else ""
+        // auto 也可能选中 NPU，同样先备好。
+        val skelDir = if (backend == GpuBackend.NPU || backend == GpuBackend.AUTO) extractSkels() else ""
         val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE, backend.value, skelDir)
         if (loaded == 0L) {
             throw LocalTranslateException(loadFailureMessage(backend))

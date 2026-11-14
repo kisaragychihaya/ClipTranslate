@@ -42,6 +42,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <new>
 #include <string>
@@ -368,48 +369,40 @@ void log_devices() {
  * Hexagon 同时匹配 "htp" 和 "hexagon"（上游注册名是 "HTP"、设备描述才是
  * "Hexagon"，两个词都不算错）。
  *
- * auto 明确排除 Hexagon：NPU 在 llama.cpp 里仍是实验后端，用户没选就不该悄悄
- * 跑上去（ggml 的注册顺序是 OpenCL 在前，但 OpenCL 注册失败时顺序就变了，
- * 这里不依赖顺序）。auto 只在连 OpenCL 都没有时才退到任意 GPU。
+ * auto 的优先级：Hexagon NPU > OpenCL GPU > CPU（NPU 实测 decode 是 CPU 的 11 倍，
+ * prefill 是 30 倍，且已完成真机验证）。NPU 装载失败会回落 OpenCL，再失败回落 CPU。
  *
  * 不把 devices 留空交给 llama 自己挑，是因为 llama 只按 props.device_id 去重，
  * 而 OpenCL backend 根本不填 device_id，留空万一将来多挂一个后端就会把同一块
  * GPU 当成两台设备、把层切开来跑（两边各自建一份 buffer，更慢也更吃内存）。
  */
-ggml_backend_dev_t pick_device(int32_t gpu_backend) {
-    const bool want_opencl = gpu_backend == kGpuOpenCl;
-    const bool want_hexagon = gpu_backend == kGpuHexagon;
+ggml_backend_dev_t pick_device(int32_t gpu_backend, bool exclude_hexagon = false) {
     const size_t count = ggml_backend_dev_count();
     auto is_hexagon = [](ggml_backend_dev_t dev) {
         return device_matches(dev, "htp") || device_matches(dev, "hexagon");
     };
-    // 第一轮：显式后端按名字匹配，auto 取任意一块非 Hexagon 的 GPU。
-    for (size_t i = 0; i < count; ++i) {
-        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (dev == nullptr || !is_gpu_device(dev)) {
-            continue;
-        }
-        if (want_opencl && !device_matches(dev, "opencl")) {
-            continue;
-        }
-        if (want_hexagon && !is_hexagon(dev)) {
-            continue;
-        }
-        if (!want_hexagon && is_hexagon(dev)) {
-            continue;
-        }
-        return dev;
-    }
-    if (!want_opencl && !want_hexagon) {
-        // auto：没有 OpenCL/别的 GPU，才接受 Hexagon。
+    auto find = [&](const std::function<bool(ggml_backend_dev_t)> & match) {
         for (size_t i = 0; i < count; ++i) {
             ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-            if (dev != nullptr && is_gpu_device(dev)) {
+            if (dev != nullptr && is_gpu_device(dev) && match(dev)) {
                 return dev;
             }
         }
+        return static_cast<ggml_backend_dev_t>(nullptr);
+    };
+    if (gpu_backend == kGpuOpenCl) {
+        return find([&](ggml_backend_dev_t dev) { return device_matches(dev, "opencl"); });
     }
-    return nullptr;
+    if (gpu_backend == kGpuHexagon) {
+        return find(is_hexagon);
+    }
+    // auto
+    if (!exclude_hexagon) {
+        if (ggml_backend_dev_t dev = find(is_hexagon)) {
+            return dev;
+        }
+    }
+    return find([&](ggml_backend_dev_t dev) { return !is_hexagon(dev); });
 }
 
 }  // namespace
@@ -453,15 +446,10 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
 
         // Hexagon 的 skel 目录必须在 llama_backend_init() 之前交出去：
         // llama_backend_init() -> ggml_backend_load_all() 会跑 ggml_backend_hexagon_reg()，
-        // 里面 htpdrv_init() 探测 DSP（不存在就整个后端不注册）。目录不对就没法加载，
+        // 里面 htpdrv_init() 探测 DSP（不存在就整个后端不注册）。目录不对就没法加载。
+        // auto 现在也可能选中 NPU，所以只要给了目录就 setenv（不论 gpu_backend 取值）；
         // 显式要 NPU 却连目录都没给属于调用方错误，直接失败比悄悄退 CPU 好排查。
-        if (gpu_backend == kGpuHexagon) {
-            if (skel_path.empty()) {
-                LOGE("nativeLoad: gpu_backend=4 (Hexagon) but skel_dir is empty");
-                release_fields(session);
-                delete session;
-                return 0;
-            }
+        if (!skel_path.empty()) {
             if (setenv("GGML_HEXAGON_LIBHTP_DIR", skel_path.c_str(), 1) != 0) {
                 LOGE("nativeLoad: setenv(GGML_HEXAGON_LIBHTP_DIR) failed");
                 release_fields(session);
@@ -469,6 +457,11 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
                 return 0;
             }
             LOGI("nativeLoad: GGML_HEXAGON_LIBHTP_DIR=%s", skel_path.c_str());
+        } else if (gpu_backend == kGpuHexagon) {
+            LOGE("nativeLoad: gpu_backend=4 (Hexagon) but skel_dir is empty");
+            release_fields(session);
+            delete session;
+            return 0;
         }
 
         // 必须先 init：静态构建里三个 backend（CPU/OpenCL/Hexagon）由
@@ -545,13 +538,35 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
 
         bool loaded = load_and_init(model_params);
         if (!loaded && gpu_requested && gpu_backend == kGpuAuto) {
-            // 显式指定 CPU / OpenCL 的不做这个兜底：用户要的就是那个后端，
-            // 悄悄换掉反而更难排查。
-            LOGW("nativeLoad: GPU load failed, retrying on CPU");
-            release_fields(session);  // 清掉半成品（model/vocab/ctx）
-            model_params.devices = nullptr;
-            model_params.n_gpu_layers = 0;
-            loaded = load_and_init(model_params);
+            // auto 回落链：NPU 失败 → OpenCL（或别的非 NPU GPU）→ CPU。
+            // 显式指定后端的不做这个兜底：用户要的就是那个后端，悄悄换掉更难排查。
+            auto is_hexagon = [](ggml_backend_dev_t dev) {
+                return device_matches(dev, "htp") || device_matches(dev, "hexagon");
+            };
+            const bool tried_hexagon =
+                !selected.empty() && selected[0] != nullptr && is_hexagon(selected[0]);
+            if (tried_hexagon) {
+                LOGW("nativeLoad: NPU load failed, retrying on GPU (OpenCL)");
+                release_fields(session);
+                selected.clear();
+                const ggml_backend_dev_t dev = pick_device(kGpuAuto, /*exclude_hexagon=*/true);
+                if (dev != nullptr) {
+                    selected.push_back(dev);
+                    selected.push_back(nullptr);
+                    model_params.devices = selected.data();
+                    model_params.n_gpu_layers = kAllGpuLayers;
+                    LOGI("nativeLoad: fallback backend=%s device=%s",
+                         ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
+                    loaded = load_and_init(model_params);
+                }
+            }
+            if (!loaded) {
+                LOGW("nativeLoad: GPU load failed, retrying on CPU");
+                release_fields(session);  // 清掉半成品（model/vocab/ctx）
+                model_params.devices = nullptr;
+                model_params.n_gpu_layers = 0;
+                loaded = load_and_init(model_params);
+            }
         }
         if (!loaded) {
             LOGE("nativeLoad: model load failed (device=CPU fallback=%d)",
