@@ -40,7 +40,7 @@ fun AppNav() {
     // miuix 0.8.8 的 SuperDialog/SuperBottomSheet 内部用 NavigationBackHandler，
     // 依赖 LocalNavigationEventDispatcherOwner；navigation-compose 2.9.0 的 NavHost
     // 不提供它（真机点「更多」必崩 IllegalStateException），在根部显式提供。
-    val dispatcherOwner = rememberNavigationEventDispatcherOwner()
+    val dispatcherOwner = rememberNavigationEventDispatcherOwner(parent = null)
 
     // 系统返回键兜底：在设置页时由这里处理，恢复出的孤立栈也能回到主页。
     BackHandler(enabled = backStackEntry?.destination?.route == ROUTE_SETTINGS) {
