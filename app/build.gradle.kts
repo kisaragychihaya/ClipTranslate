@@ -18,11 +18,29 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        // CI 注入固定 Release keystore（GitHub Secrets）；本地无 secrets 时不创建，回退 debug 签名。
+        val keystoreBase64 = providers.environmentVariable("RELEASE_KEYSTORE_BASE64").orNull
+        if (keystoreBase64 != null) {
+            create("release") {
+                val keystoreFile = rootProject.layout.buildDirectory.file("ci-release.keystore").get().asFile
+                keystoreFile.parentFile.mkdirs()
+                if (!keystoreFile.exists()) {
+                    keystoreFile.writeBytes(java.util.Base64.getDecoder().decode(keystoreBase64))
+                }
+                storeFile = keystoreFile
+                storePassword = providers.environmentVariable("RELEASE_STORE_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("RELEASE_KEY_ALIAS").orNull
+                keyPassword = providers.environmentVariable("RELEASE_KEY_PASSWORD").orNull
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
