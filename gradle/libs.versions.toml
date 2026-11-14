@@ -6,6 +6,7 @@ activity-compose = "1.10.1"
 lifecycle = "2.9.1"
 coroutines = "1.10.2"
 navigation = "2.9.0"
+navigationevent = "1.0.1"
 miuix = "0.8.8"
 
 [libraries]
@@ -21,6 +22,10 @@ androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "l
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigation" }
+# miuix 0.8.8 的 SuperDialog/SuperBottomSheet 依赖 androidx.navigationevent.compose 包，
+# 但 miuix 的 pom 没把它作为 api 依赖暴露，navigation-compose 2.9.0 也不带——
+# 必须显式引入（用 JetBrains 的 KMP 移植版，与 miuix 编译时使用的二进制同源）。
+navigationevent-compose = { module = "org.jetbrains.androidx.navigationevent:navigationevent-compose", version.ref = "navigationevent" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
