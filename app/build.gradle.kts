@@ -1,3 +1,4 @@
+import java.util.Base64
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -26,7 +27,7 @@ android {
                 val keystoreFile = rootProject.layout.buildDirectory.file("ci-release.keystore").get().asFile
                 keystoreFile.parentFile.mkdirs()
                 if (!keystoreFile.exists()) {
-                    keystoreFile.writeBytes(java.util.Base64.getDecoder().decode(keystoreBase64))
+                    keystoreFile.writeBytes(Base64.getDecoder().decode(keystoreBase64))
                 }
                 storeFile = keystoreFile
                 storePassword = providers.environmentVariable("RELEASE_STORE_PASSWORD").orNull
