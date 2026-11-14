@@ -51,6 +51,14 @@ android {
                 keyPassword = providers.environmentVariable("RELEASE_KEY_PASSWORD").orNull
             }
         }
+        // 固定 debug 签名（仓库内公开的标准调试 keystore，无安全用途）：
+        // CI 每台 runner 随机生成 debug key，不固定的话每次 debug 包都要卸载重装。
+        debug {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
