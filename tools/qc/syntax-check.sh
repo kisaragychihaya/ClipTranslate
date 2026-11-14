@@ -65,23 +65,26 @@ KOTLINC_EXIT=$?
 
 ALL_ERRORS="$(grep -E 'error: ' "$RAW_LOG" || true)"
 SYNTAX_ERRORS="$(printf '%s\n' "$ALL_ERRORS" | grep -E 'error: (Expecting|Unexpected|Unclosed|unclosed|Syntax)' || true)"
-OWN_ERRORS="$(awk -v pat='dev[.]cliptranslate[.]' '
-    BEGIN { diag = "" }
+# The generated R class (dev.cliptranslate.R) is produced by AAPT at build time,
+# so any reference to it is unresolved in this SDK-less parse -- whitelist it.
+# kotlinc 2.1.x prints only simple names in diagnostics ('unresolved reference
+# 'R''), so the decision must use the source-echo line that follows the diagnostic.
+OWN_ERRORS="$(awk -v pat='dev[.]cliptranslate[.]' -v rpat='dev[.]cliptranslate[.]R([.[:space:]]|$)' '
+    function keep() { return (diag ~ pat || echo ~ pat) && diag !~ rpat && echo !~ rpat }
+    BEGIN { diag = ""; echo = "" }
     /: error: / {
-        if (diag != "" && diag ~ pat) print diag
-        diag = $0
+        if (diag != "" && keep()) print diag
+        diag = $0; echo = ""
         next
     }
     {
         if (diag != "") {
-            if (diag ~ pat || $0 ~ pat) print diag
-            diag = ""
+            if (echo == "") { echo = $0; if (keep()) print diag }
+            diag = ""; echo = ""
         }
     }
-    END { if (diag != "" && diag ~ pat) print diag }
-' "$RAW_LOG" | grep -v -E 'dev[.]cliptranslate[.]R([.[:space:]]|$)' || true)"
-# The generated R class (dev.cliptranslate.R) is produced by AAPT at build time,
-# so any reference to it is unresolved in this SDK-less parse -- whitelist it.
+    END { if (diag != "" && keep()) print diag }
+' "$RAW_LOG")"
 
 count_lines() {
     if [ -z "$1" ]; then
