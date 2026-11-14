@@ -32,6 +32,7 @@ out/
 # Keystores
 *.jks
 *.keystore
+!debug.keystore  # 标准调试签名（android/androiddebugkey），公开无安全风险，固定它是为了 CI debug 包签名稳定
 
 # OS
 .DS_Store
