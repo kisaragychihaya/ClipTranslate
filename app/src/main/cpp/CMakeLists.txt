@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 
 # libcliptranslate_jni.so = JNI 桥 + 静态链进去的 llama.cpp。
-# backend 有三个，全部静态注册（GGML_BACKEND_DL=OFF）：CPU / OpenCL(Adreno) / Vulkan，
+# backend 有两个，静态注册（GGML_BACKEND_DL=OFF）：CPU / OpenCL(Adreno)，
 # 具体用哪个由 cliptranslate_jni.cpp 按 Kotlin 传来的 gpuBackend 在运行时决定。
+# Vulkan 曾经接过，但 Adreno 830 的驱动在 createComputePipeline 上直接失败
+# （ErrorUnknown，整个进程被杀），是驱动 bug、没有通用解，所以整体移除了。
 #
 # llama.cpp 用 FetchContent 拉 release tarball，不用 git submodule：
 # CI 上 checkout 是干净的，FetchContent 只需要网络，不会因为 submodule 没初始化而挂。
@@ -16,11 +18,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
-# 后端开关：默认三个都上；CI/真机上某个后端出问题时改这里（不动下面的逻辑），
-# 关掉 GPU 后端后 .so 就退回 CPU-only 版本，Kotlin 侧不需要跟着改。
+# 后端开关：默认开 OpenCL；真机上出问题时改这里（不动下面的逻辑），关掉后 .so
+# 就退回 CPU-only 版本，Kotlin 侧不需要跟着改。
 # ---------------------------------------------------------------------------
 option(CLIPTRANSLATE_GPU_OPENCL "编译 ggml 的 OpenCL backend（Adreno GPU）" ON)
-option(CLIPTRANSLATE_GPU_VULKAN "编译 ggml 的 Vulkan backend" ON)
 
 # ---------------------------------------------------------------------------
 # llama.cpp
@@ -167,140 +168,12 @@ else()
     set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
 endif()
 
-# ---------------------------------------------------------------------------
-# Vulkan backend 的前置条件
-#
-# ggml/src/ggml-vulkan/CMakeLists.txt 要求：
-#   * find_package(Vulkan COMPONENTS glslc REQUIRED)
-#       - 目标侧：NDK sysroot 里的 vulkan 头 + 各 API level 的 libvulkan.so stub
-#         （libvulkan.so 在 /system/lib64，属于 Android 的 public library，运行时能加载）
-#       - 宿主侧：glslc（shaderc 的命令行编译器）必须在 PATH 上。CI 里 apt 装
-#         glslc（universe 源，见 .github/workflows/build-apk.yml）。
-#         注意不是 glslang-tools：b12375 只用 glslc 编 shader，glslangValidator 已经不用了。
-#   * find_package(SPIRV-Headers CONFIG REQUIRED)：ggml-vulkan-types.h 要
-#     <spirv/unified1/spirv.hpp>。CI 里 apt 装 spirv-headers；万一没有就自己拉一份头，
-#     并给 find_package(CONFIG) 造一个最小的 config 文件顶上。
-#   * ggml-vulkan-types.h 还要 <vulkan/vulkan.hpp>（Vulkan-Hpp，C++ 头），而 NDK 的
-#     sysroot 只有 C 头 vulkan.h / vulkan_core.h —— 所以另外 FetchContent 一份
-#     Khronos Vulkan-Headers，在 llama.cpp 的目标建好之后用 BEFORE 挂到 ggml-vulkan 上
-#     （vulkan.hpp 里 static_assert VK_HEADER_VERSION == 350，C 头必须同版本）。
-#   * shader 生成用 ExternalProject 把 vulkan-shaders-gen 用**宿主**编译器编出来
-#     （cmake/host-toolchain.cmake.in 自动探测宿主的 gcc/clang），然后对每个 .comp
-#     调一次 glslc 生成 .spv 并内嵌进库。这一步是纯 CPU 活，交叉编译不受影响，
-#     但会让 CI 多花几分钟。
-# 源码里没有 #ifdef __ANDROID__ 分支，Android 上走的就是普通 Linux 路径。
-# ---------------------------------------------------------------------------
-if(ANDROID AND CLIPTRANSLATE_GPU_VULKAN)
-    # NDK 根目录：CMake 的 Android 平台模块给 CMAKE_ANDROID_NDK，NDK 自己的
-    # toolchain 文件给 ANDROID_NDK，两个都兜一下（只用于下面给 find_package 的提示）。
-    set(_ndk_root "${CMAKE_ANDROID_NDK}")
-    if(NOT _ndk_root)
-        set(_ndk_root "${ANDROID_NDK}")
-    endif()
-    # NDK toolchain 的 implicit link dirs 一般够 find_package 用；这里再显式给一次候选，
-    # 免得 CMake 版本差异导致 “Could NOT find Vulkan”。只在没找到时才覆盖。
-    if(NOT Vulkan_INCLUDE_DIR)
-        file(GLOB _vk_headers "${_ndk_root}/toolchains/llvm/prebuilt/*/sysroot/usr/include/vulkan/vulkan.h")
-        if(_vk_headers)
-            list(GET _vk_headers 0 _vk_header)
-            get_filename_component(_vk_include "${_vk_header}" DIRECTORY)   # .../include/vulkan
-            get_filename_component(_vk_include "${_vk_include}" DIRECTORY)  # .../include
-            set(Vulkan_INCLUDE_DIR "${_vk_include}" CACHE PATH "NDK vulkan headers" FORCE)
-        endif()
-    endif()
-    if(NOT Vulkan_LIBRARY)
-        if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
-            set(_vk_lib_abi "aarch64-linux-android")
-        elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
-            set(_vk_lib_abi "arm-linux-androideabi")
-        elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
-            set(_vk_lib_abi "x86_64-linux-android")
-        else()
-            set(_vk_lib_abi "i686-linux-android")
-        endif()
-        file(GLOB _vk_stubs "${_ndk_root}/toolchains/llvm/prebuilt/*/sysroot/usr/lib/${_vk_lib_abi}/*/libvulkan.so")
-        if(_vk_stubs)
-            # 目录名就是 API level（26/28/30…），取最大的那份 stub。
-            list(SORT _vk_stubs)
-            list(LENGTH _vk_stubs _vk_stub_count)
-            math(EXPR _vk_last "${_vk_stub_count} - 1")
-            list(GET _vk_stubs ${_vk_last} _vk_stub)
-            set(Vulkan_LIBRARY "${_vk_stub}" CACHE FILEPATH "NDK libvulkan.so stub" FORCE)
-        endif()
-    endif()
-
-    find_package(SPIRV-Headers CONFIG QUIET)
-    if(NOT SPIRV-Headers_FOUND)
-        set(SPIRV_HEADERS_TAG "vulkan-sdk-1.4.350.0" CACHE STRING "Khronos SPIRV-Headers release tag")
-        FetchContent_Declare(
-                spirv_headers
-                URL https://github.com/KhronosGroup/SPIRV-Headers/archive/refs/tags/${SPIRV_HEADERS_TAG}.tar.gz
-                ${_fetch_extra}
-        )
-        FetchContent_GetProperties(spirv_headers)
-        if(NOT spirv_headers_POPULATED)
-            FetchContent_Populate(spirv_headers)
-        endif()
-        # 头直接进全局 include（ggml-vulkan 的子目录会继承），
-        # config 只是为了让上游那句 find_package(SPIRV-Headers CONFIG REQUIRED) 通过。
-        include_directories("${spirv_headers_SOURCE_DIR}/include")
-        set(_spirv_fake_cfg "${CMAKE_CURRENT_BINARY_DIR}/spirv-headers-config")
-        file(MAKE_DIRECTORY "${_spirv_fake_cfg}")
-        file(WRITE "${_spirv_fake_cfg}/SPIRV-HeadersConfig.cmake"
-                "# 占位：头文件已经通过 include_directories 加进去了\nset(SPIRV-Headers_FOUND TRUE)\n")
-        set(SPIRV-Headers_DIR "${_spirv_fake_cfg}" CACHE PATH "SPIRV-Headers 占位 config" FORCE)
-        message(STATUS "SPIRV-Headers: 系统里没有，改用 FetchContent ${SPIRV_HEADERS_TAG}")
-    endif()
-
-    # Vulkan-Hpp（C++ 头 vulkan/vulkan.hpp）：NDK r27 的 sysroot 只有 C 头
-    # vulkan.h / vulkan_core.h，没有 vulkan.hpp，而 ggml-vulkan-types.h 直接
-    # `#include <vulkan/vulkan.hpp>` 用 vk:: 命名空间，所以必须自己拉一份。
-    # 版本要和 SPIRV-Headers 同代，这里两个都用 vulkan-sdk-1.4.350.0
-    # （Vulkan-Headers 里这个 tag 确实存在，git ls-remote 核过）。
-    # 注意：vulkan.hpp 第 40 行有 `VULKAN_HPP_STATIC_ASSERT(VK_HEADER_VERSION == 350, ...)`，
-    # 所以 C 头也必须是这份 1.4.350 的，不能是 NDK 里那个旧版本 —— 下面的
-    # target_include_directories(... BEFORE ...) 就是为了抢在 NDK sysroot 前面。
-    set(VULKAN_HEADERS_TAG "vulkan-sdk-1.4.350.0" CACHE STRING "Khronos Vulkan-Headers release tag")
-    FetchContent_Declare(
-            vulkan_headers
-            URL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/${VULKAN_HEADERS_TAG}.tar.gz
-            ${_fetch_extra}
-    )
-    FetchContent_GetProperties(vulkan_headers)
-    if(NOT vulkan_headers_POPULATED)
-        FetchContent_Populate(vulkan_headers)
-    endif()
-    if(NOT EXISTS "${vulkan_headers_SOURCE_DIR}/include/vulkan/vulkan.hpp")
-        message(FATAL_ERROR "Vulkan-Headers 里没找到 include/vulkan/vulkan.hpp，检查 VULKAN_HEADERS_TAG")
-    endif()
-    message(STATUS "Vulkan-Hpp: ${vulkan_headers_SOURCE_DIR}/include (${VULKAN_HEADERS_TAG})")
-
-    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-else()
-    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
-endif()
-
 FetchContent_Declare(
         llama_cpp
         URL https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_TAG}.tar.gz
         ${_fetch_extra}
 )
 FetchContent_MakeAvailable(llama_cpp)
-
-# ---------------------------------------------------------------------------
-# Vulkan-Hpp 的 include 要等 ggml-vulkan 目标存在后再补，而且必须 BEFORE：
-# ggml-vulkan-types.h 先 include <vulkan/vulkan_core.h>、再 include <vulkan/vulkan.hpp>，
-# 两份头必须来自同一个版本（vulkan.hpp 里 static_assert VK_HEADER_VERSION == 350），
-# 所以要让 FetchContent 下来那份 1.4.350 抢在 NDK sysroot 的同名头前面。
-# ggml-vulkan 其余 vulkan 相关 include 只有这两个头（对着 b12375 源码 grep 过），
-# Vulkan-Headers 的 include/ 里都有（vulkan.h/.hpp/_core.h/funcs/structs/enums/handles
-# + vk_video/，vulkan.hpp 内部还要的 vulkan_*.hpp 也齐）。
-# ---------------------------------------------------------------------------
-if(TARGET ggml-vulkan)
-    if(DEFINED vulkan_headers_SOURCE_DIR)
-        target_include_directories(ggml-vulkan BEFORE PRIVATE "${vulkan_headers_SOURCE_DIR}/include")
-    endif()
-endif()
 
 # ---------------------------------------------------------------------------
 # JNI 库
@@ -314,8 +187,8 @@ target_include_directories(cliptranslate_jni PRIVATE
         ${llama_cpp_SOURCE_DIR}/include
         ${llama_cpp_SOURCE_DIR}/ggml/include)
 
-# llama 是静态库，PUBLIC 依赖会带上 ggml / ggml-base / ggml-cpu / ggml-vulkan /
-# ggml-opencl / Threads（ggml_add_backend_library 对静态 backend 用的是 PUBLIC 链接，
+# llama 是静态库，PUBLIC 依赖会带上 ggml / ggml-base / ggml-cpu / ggml-opencl /
+# Threads（ggml_add_backend_library 对静态 backend 用的是 PUBLIC 链接，
 # 所以这里不用单独再链一遍 backend 库），ggml-base 自己会在 Android 上补 dl 和 m。
 # log 是 NDK 的 liblog（__android_log_*）。
 target_link_libraries(cliptranslate_jni PRIVATE llama android log)

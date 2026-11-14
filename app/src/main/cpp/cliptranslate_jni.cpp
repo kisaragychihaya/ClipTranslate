@@ -12,13 +12,17 @@
 // from llama_model_default_params()/llama_context_default_params() and only the
 // fields we care about are overwritten.
 //
-// Backends: CPU, OpenCL and Vulkan are all statically registered by ggml (see
+// Backends: CPU and OpenCL are both statically registered by ggml (see
 // CMakeLists.txt), so llama_backend_init() already exposes every device. Which
 // one a load uses is decided here from the `gpuBackend` argument, via
 // llama_model_params.devices (the same field llama-server's --device uses) plus
-// n_gpu_layers. There is no CPU fallback for an explicit OpenCL/Vulkan request:
-// a missing device makes nativeLoad() return 0 so Kotlin can show a readable
+// n_gpu_layers. There is no CPU fallback for an explicit OpenCL request: a
+// missing device makes nativeLoad() return 0 so Kotlin can show a readable
 // message instead of silently running 10x slower.
+//
+// Vulkan used to be a third backend. It is gone: the Adreno 830 driver fails
+// createComputePipeline() on ggml's basic mul_mat_vec_q4_k shaders with
+// ErrorUnknown and kills the process (a driver bug with no workaround).
 
 #include <jni.h>
 
@@ -47,10 +51,12 @@ constexpr const char * kEndOfTurn = "<end_of_turn>";
 constexpr int32_t kNBatch = 512;
 
 /** 与 Kotlin 的 GpuBackend 枚举一一对应；改这里必须同步改 LlamaBridge.nativeLoad。 */
-constexpr int32_t kGpuAuto = 0;      // GPU 优先，GPU 装载失败时自动回落 CPU
+constexpr int32_t kGpuAuto = 0;      // GPU 优先（OpenCL），GPU 装载失败时自动回落 CPU
 constexpr int32_t kGpuCpuOnly = 1;   // 只用 CPU
 constexpr int32_t kGpuOpenCl = 2;    // 强制 OpenCL（Adreno）
-constexpr int32_t kGpuVulkan = 3;    // 强制 Vulkan
+
+/** 曾经是「强制 Vulkan」（3）；Vulkan 后端已从构建里移除，这里只留个记号做防御。 */
+constexpr int32_t kGpuVulkanRemoved = 3;
 
 /** 全部 offload：llama 会把 99 当成“参数里的上限”，实际层数由模型决定。 */
 constexpr int32_t kAllGpuLayers = 99;
@@ -310,7 +316,7 @@ bool is_gpu_device(ggml_backend_dev_t dev) {
     return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
 }
 
-/** 后端注册名（"Vulkan" / "OpenCL"）或设备名里含 want 就算匹配。 */
+/** 后端注册名（"OpenCL"）或设备名里含 want 就算匹配。 */
 bool device_matches(ggml_backend_dev_t dev, const char * want) {
     ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
     if (reg != nullptr && contains_ci(ggml_backend_reg_name(reg), want)) {
@@ -342,20 +348,17 @@ void log_devices() {
 /**
  * 按 gpuBackend 选一个 GPU 设备。
  *
- * auto 取枚举到的第一个 GPU：ggml-backend-reg.cpp 里的注册顺序是 CUDA/Metal/SYCL/
- * Vulkan/…/OpenCL/…/CPU，Android 上只有 Vulkan 和 OpenCL，所以 auto = Vulkan。
+ * 现在构建里只有 OpenCL 一个 GPU 后端，所以 auto 就是“取第一块 OpenCL GPU”；
+ * 匹配仍然按后端注册名（"OpenCL"）/ 设备名走，将来再挂别的 GPU 后端时这里不用改
+ * 也能退化到“任意一块 GPU”。
  * 不把 devices 留空交给 llama 自己挑，是因为 llama 只按 props.device_id 去重，
- * 而 Vulkan/OpenCL 两个 backend 在 Adreno 上都不填 device_id，留空会让它把同一块
+ * 而 OpenCL backend 根本不填 device_id，留空万一将来多挂一个后端就会把同一块
  * GPU 当成两台设备、把层切开来跑（两边各自建一份 buffer，更慢也更吃内存）。
  */
 ggml_backend_dev_t pick_device(int32_t gpu_backend) {
-    const char * want = nullptr;
-    if (gpu_backend == kGpuOpenCl) {
-        want = "opencl";
-    } else if (gpu_backend == kGpuVulkan) {
-        want = "vulkan";
-    }
+    const char * want = gpu_backend == kGpuOpenCl ? "opencl" : nullptr;
     const size_t count = ggml_backend_dev_count();
+    // auto：先找 OpenCL GPU，找不到再退回任意 GPU。
     for (size_t i = 0; i < count; ++i) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         if (dev == nullptr || !is_gpu_device(dev)) {
@@ -393,11 +396,22 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
         LOGI("nativeLoad: path=%s n_threads=%d n_ctx=%d gpu_backend=%d", path.c_str(),
              (int) n_threads, (int) n_ctx, (int) gpu_backend);
 
-        // 必须先 init：静态构建里三个 backend（CPU/OpenCL/Vulkan）由
+        // 必须先 init：静态构建里两个 backend（CPU/OpenCL）由
         // ggml_backend_load_all() 一次性注册进来，探测失败的 backend 不会注册设备。
         llama_backend_init();
         llama_log_set(llama_log_to_logcat, nullptr);
         log_devices();
+
+        // 防御：Kotlin 侧已删掉 Vulkan 枚举（3），但历史设置里可能还留着这个值；
+        // 其他未知值同理。一律按 auto 处理并打一行警告，不要因为脏数据让翻译不可用。
+        if (gpu_backend == kGpuVulkanRemoved) {
+            LOGW("nativeLoad: gpu_backend=3 (Vulkan) no longer exists, treating as auto");
+            gpu_backend = kGpuAuto;
+        } else if (gpu_backend != kGpuAuto && gpu_backend != kGpuCpuOnly &&
+                   gpu_backend != kGpuOpenCl) {
+            LOGW("nativeLoad: unknown gpu_backend=%d, treating as auto", (int) gpu_backend);
+            gpu_backend = kGpuAuto;
+        }
 
         llama_model_params model_params = llama_model_default_params();
         model_params.n_gpu_layers = 0;  // 默认 CPU，下面按 gpu_backend 覆盖
@@ -412,11 +426,11 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
         } else {
             const ggml_backend_dev_t dev = pick_device(gpu_backend);
             if (dev == nullptr) {
-                if (gpu_backend == kGpuOpenCl || gpu_backend == kGpuVulkan) {
-                    // 用户显式指定了后端却没有对应设备（驱动不支持 / 后端没编进来）：
+                if (gpu_backend == kGpuOpenCl) {
+                    // 用户显式指定了 OpenCL 却没有对应设备（驱动不支持 / 后端没编进来）：
                     // 老实失败，让 Kotlin 给出可读提示，别悄悄退到 CPU 装作成功。
-                    LOGE("nativeLoad: no %s device registered (gpu_backend=%d)",
-                         gpu_backend == kGpuOpenCl ? "OpenCL" : "Vulkan", (int) gpu_backend);
+                    LOGE("nativeLoad: no OpenCL device registered (gpu_backend=%d)",
+                         (int) gpu_backend);
                     release_fields(session);
                     delete session;
                     return 0;
@@ -466,7 +480,7 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
 
         bool loaded = load_and_init(model_params);
         if (!loaded && gpu_requested && gpu_backend == kGpuAuto) {
-            // 显式指定 CPU / OpenCL / Vulkan 的不做这个兜底：用户要的就是那个后端，
+            // 显式指定 CPU / OpenCL 的不做这个兜底：用户要的就是那个后端，
             // 悄悄换掉反而更难排查。
             LOGW("nativeLoad: GPU load failed, retrying on CPU");
             release_fields(session);  // 清掉半成品（model/vocab/ctx）
@@ -643,7 +657,7 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeGenerate(
         const long long gen_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - prompt_end).count();
         // tok_s 只算生成阶段（prompt 处理单独看 prompt_ms）。真机上按 gpuBackend 各跑
-        // 一次、logcat 里 grep 这一行就能横向对比 CPU/OpenCL/Vulkan。
+        // 一次、logcat 里 grep 这一行就能横向对比 CPU / OpenCL。
         const double tok_s =
                 gen_ms > 0 ? static_cast<double>(gen_tokens) * 1000.0 / static_cast<double>(gen_ms) : 0.0;
         LOGI("nativeGenerate: n_prompt=%d prompt_ms=%lld gen_tokens=%d gen_ms=%lld tok_s=%.2f "

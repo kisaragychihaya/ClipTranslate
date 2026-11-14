@@ -366,7 +366,6 @@ private fun gpuBackendLabel(backend: GpuBackend): String = stringResource(
         GpuBackend.AUTO -> R.string.local_model_gpu_auto
         GpuBackend.CPU -> R.string.local_model_gpu_cpu
         GpuBackend.OPENCL -> R.string.local_model_gpu_opencl
-        GpuBackend.VULKAN -> R.string.local_model_gpu_vulkan
     },
 )
 

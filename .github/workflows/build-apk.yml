@@ -30,20 +30,6 @@ jobs:
           packages: "platforms;android-36 build-tools;36.0.0 platform-tools cmake;3.22.1 ndk;27.3.13750724"
           log-accepted-android-sdk-licenses: false
 
-      # GPU backend 的宿主侧依赖（app/src/main/cpp/CMakeLists.txt 里 Vulkan 那一段有说明）：
-      #   glslc         = glslang 的 SPIR-V 编译器，ggml-vulkan 用它把 .comp 编成 .spv
-      #                   （find_package(Vulkan COMPONENTS glslc) 要它；是 glslc，不是
-      #                    glslang-tools 里的 glslangValidator，b12375 已经不用后者了）
-      #   spirv-headers = <spirv/unified1/spirv.hpp> + CMake config，ggml-vulkan 硬依赖
-      # 两个都在 ubuntu-24.04 的 universe 源里，apt 直接装。python3 镜像自带
-      # （ggml-opencl 用它把 CL kernel 内嵌成头文件）。
-      - name: Install host tools for the GPU backends
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends glslc spirv-headers
-          glslc --version
-          ls /usr/share/cmake/SPIRV-Headers/
-
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
@@ -72,17 +58,17 @@ jobs:
             echo "OK: lib/arm64-v8a/libcliptranslate_jni.so"
             echo "--- lib/ 全部内容"
             unzip -l "$apk" | grep "lib/" || true
-            for unwanted in libOpenCL.so libOpenCL.linkstub libvulkan.so; do
+            for unwanted in libOpenCL.so libOpenCL.linkstub; do
               if unzip -l "$apk" | grep -q "lib/arm64-v8a/${unwanted}"; then
-                echo "::error::$apk 里出现了 ${unwanted}（OpenCL 链接桩不该进包，Vulkan 用系统的 /system/lib64/libvulkan.so）"
+                echo "::error::$apk 里出现了 ${unwanted}（OpenCL 链接桩不该进包，运行时用设备 /vendor/lib64/libOpenCL.so）"
                 exit 1
               fi
             done
             echo "OK: 没有多余的系统库副本"
-            # 提示性检查：确认两个 GPU 后端真的被编进 .so 了（CMake 里若因为
-            # find_package 没找到而静默关掉某个后端，这里能看出来）。不红，只警告。
+            # 提示性检查：确认 OpenCL 后端真的被编进 .so 了（CMake 里若因为
+            # find_package 没找到而静默关掉后端，这里能看出来）。不红，只警告。
             unzip -p "$apk" lib/arm64-v8a/libcliptranslate_jni.so > /tmp/cliptranslate_jni.so
-            for marker in "ggml_opencl:" "ggml_vulkan:"; do
+            for marker in "ggml_opencl:"; do
               if strings /tmp/cliptranslate_jni.so | grep -q "$marker"; then
                 echo "OK: backend marker ${marker}"
               else

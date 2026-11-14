@@ -89,7 +89,7 @@ class LocalTranslator private constructor(context: Context) {
 
     /** 显式选了 GPU 后端还加载失败，多半是该后端在这台机器上不可用，提示换一种方式。 */
     private fun loadFailureMessage(backend: GpuBackend): String = when (backend) {
-        GpuBackend.OPENCL, GpuBackend.VULKAN ->
+        GpuBackend.OPENCL ->
             "所选 GPU 后端不可用，请切换加速方式或改用 CPU"
 
         else -> "本地模型加载失败（内存不足或模型文件损坏）"

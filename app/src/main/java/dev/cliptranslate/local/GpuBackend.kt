@@ -15,9 +15,6 @@ enum class GpuBackend(val value: Int) {
 
     /** 2：强制 OpenCL（Adreno）。 */
     OPENCL(2),
-
-    /** 3：强制 Vulkan。 */
-    VULKAN(3),
     ;
 
     companion object {
