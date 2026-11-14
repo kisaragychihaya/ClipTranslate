@@ -53,7 +53,8 @@ android {
         }
         // 固定 debug 签名（仓库内公开的标准调试 keystore，无安全用途）：
         // CI 每台 runner 随机生成 debug key，不固定的话每次 debug 包都要卸载重装。
-        debug {
+        // 用 named("debug") 而不是 debug{}：buildTypes 的同名访问器会遮蔽签名配置的访问器。
+        named("debug") {
             storeFile = rootProject.file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
