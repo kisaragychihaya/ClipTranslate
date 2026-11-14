@@ -17,6 +17,12 @@
     <string name="local_model_delete">删除模型</string>
     <string name="local_model_enable">启用本地离线翻译</string>
     <string name="local_model_enable_desc">关闭后主界面的服务商列表里不显示本地模型</string>
+    <string name="local_model_gpu_backend">加速方式</string>
+    <string name="local_model_gpu_auto">自动（GPU 优先）</string>
+    <string name="local_model_gpu_cpu">仅 CPU</string>
+    <string name="local_model_gpu_opencl">Adreno GPU (OpenCL)</string>
+    <string name="local_model_gpu_vulkan">Adreno GPU (Vulkan)</string>
+    <string name="local_model_gpu_hint">GPU 加速为实验功能，异常时请切回 CPU</string>
     <string name="local_model_delete_title">删除本地模型</string>
     <string name="local_model_delete_message">将删除已下载的模型文件（约 %1$s），需要时可以重新下载。</string>
     <string name="local_model_delete_confirm">删除</string>

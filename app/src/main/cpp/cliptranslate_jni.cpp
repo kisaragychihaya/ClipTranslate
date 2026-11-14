@@ -11,13 +11,24 @@
 // use_mmap/use_mlock anymore, `load_mode` instead), so both structs are taken
 // from llama_model_default_params()/llama_context_default_params() and only the
 // fields we care about are overwritten.
+//
+// Backends: CPU, OpenCL and Vulkan are all statically registered by ggml (see
+// CMakeLists.txt), so llama_backend_init() already exposes every device. Which
+// one a load uses is decided here from the `gpuBackend` argument, via
+// llama_model_params.devices (the same field llama-server's --device uses) plus
+// n_gpu_layers. There is no CPU fallback for an explicit OpenCL/Vulkan request:
+// a missing device makes nativeLoad() return 0 so Kotlin can show a readable
+// message instead of silently running 10x slower.
 
 #include <jni.h>
 
 #include <android/log.h>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <new>
@@ -25,6 +36,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "ggml-backend.h"
 #include "llama.h"
 
 namespace {
@@ -33,6 +45,15 @@ constexpr const char * kLogTag = "CliptranslateJNI";
 constexpr const char * kErrTooLong = "ERR_TOO_LONG";
 constexpr const char * kEndOfTurn = "<end_of_turn>";
 constexpr int32_t kNBatch = 512;
+
+/** 与 Kotlin 的 GpuBackend 枚举一一对应；改这里必须同步改 LlamaBridge.nativeLoad。 */
+constexpr int32_t kGpuAuto = 0;      // GPU 优先，GPU 装载失败时自动回落 CPU
+constexpr int32_t kGpuCpuOnly = 1;   // 只用 CPU
+constexpr int32_t kGpuOpenCl = 2;    // 强制 OpenCL（Adreno）
+constexpr int32_t kGpuVulkan = 3;    // 强制 Vulkan
+
+/** 全部 offload：llama 会把 99 当成“参数里的上限”，实际层数由模型决定。 */
+constexpr int32_t kAllGpuLayers = 99;
 
 /** 一次 nativeLoad 的全部 native 状态，整体作为 jlong 句柄交给 Kotlin。 */
 struct Session {
@@ -254,13 +275,107 @@ void llama_log_to_logcat(enum ggml_log_level level, const char * text, void * /*
     __android_log_write(priority, kLogTag, text);
 }
 
+const char * dev_type_name(enum ggml_backend_dev_type type) {
+    switch (type) {
+        case GGML_BACKEND_DEVICE_TYPE_CPU:   return "CPU";
+        case GGML_BACKEND_DEVICE_TYPE_GPU:   return "GPU";
+        case GGML_BACKEND_DEVICE_TYPE_IGPU:  return "IGPU";
+        case GGML_BACKEND_DEVICE_TYPE_ACCEL: return "ACCEL";
+        case GGML_BACKEND_DEVICE_TYPE_META:  return "META";
+        default:                             return "UNKNOWN";
+    }
+}
+
+/** ASCII 大小写不敏感的 contains（want 传小写字面量）。 */
+bool contains_ci(const char * haystack, const char * want) {
+    if (haystack == nullptr || want == nullptr || *want == '\0') {
+        return false;
+    }
+    const size_t want_len = std::strlen(want);
+    for (const char * p = haystack; *p != '\0'; ++p) {
+        size_t i = 0;
+        while (i < want_len && p[i] != '\0' &&
+               std::tolower(static_cast<unsigned char>(p[i])) == want[i]) {
+            ++i;
+        }
+        if (i == want_len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_gpu_device(ggml_backend_dev_t dev) {
+    const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+    return type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU;
+}
+
+/** 后端注册名（"Vulkan" / "OpenCL"）或设备名里含 want 就算匹配。 */
+bool device_matches(ggml_backend_dev_t dev, const char * want) {
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    if (reg != nullptr && contains_ci(ggml_backend_reg_name(reg), want)) {
+        return true;
+    }
+    return contains_ci(ggml_backend_dev_name(dev), want);
+}
+
+/** 把 ggml 注册进来的 backend 设备全打一遍：真机上定位“为什么走了 CPU”全靠这行。 */
+void log_devices() {
+    const size_t count = ggml_backend_dev_count();
+    LOGI("devices: %zu registered", count);
+    for (size_t i = 0; i < count; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev == nullptr) {
+            continue;
+        }
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        const char * reg_name = reg != nullptr ? ggml_backend_reg_name(reg) : "?";
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+        LOGI("devices: [%zu] backend=%s type=%s name=%s mem_free=%zu MiB mem_total=%zu MiB", i,
+             reg_name, dev_type_name(ggml_backend_dev_type(dev)), ggml_backend_dev_name(dev),
+             free_bytes / (1024 * 1024), total_bytes / (1024 * 1024));
+    }
+}
+
+/**
+ * 按 gpuBackend 选一个 GPU 设备。
+ *
+ * auto 取枚举到的第一个 GPU：ggml-backend-reg.cpp 里的注册顺序是 CUDA/Metal/SYCL/
+ * Vulkan/…/OpenCL/…/CPU，Android 上只有 Vulkan 和 OpenCL，所以 auto = Vulkan。
+ * 不把 devices 留空交给 llama 自己挑，是因为 llama 只按 props.device_id 去重，
+ * 而 Vulkan/OpenCL 两个 backend 在 Adreno 上都不填 device_id，留空会让它把同一块
+ * GPU 当成两台设备、把层切开来跑（两边各自建一份 buffer，更慢也更吃内存）。
+ */
+ggml_backend_dev_t pick_device(int32_t gpu_backend) {
+    const char * want = nullptr;
+    if (gpu_backend == kGpuOpenCl) {
+        want = "opencl";
+    } else if (gpu_backend == kGpuVulkan) {
+        want = "vulkan";
+    }
+    const size_t count = ggml_backend_dev_count();
+    for (size_t i = 0; i < count; ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (dev == nullptr || !is_gpu_device(dev)) {
+            continue;
+        }
+        if (want == nullptr || device_matches(dev, want)) {
+            return dev;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
-        JNIEnv * env, jobject /* thiz */, jstring model_path, jint n_threads, jint n_ctx) {
+        JNIEnv * env, jobject /* thiz */, jstring model_path, jint n_threads, jint n_ctx,
+        jint gpu_backend) {
     // 契约：失败返回 0，绝不抛（Kotlin 侧只判断 == 0，抛出去会击穿协程）。
     if (model_path == nullptr) {
         LOGE("nativeLoad: model_path is null");
@@ -275,46 +390,93 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
 
     try {
         const std::string path = from_jstring(env, model_path);
-        LOGI("nativeLoad: path=%s n_threads=%d n_ctx=%d", path.c_str(), (int) n_threads, (int) n_ctx);
+        LOGI("nativeLoad: path=%s n_threads=%d n_ctx=%d gpu_backend=%d", path.c_str(),
+             (int) n_threads, (int) n_ctx, (int) gpu_backend);
 
-        // 必须先 init：静态构建里 CPU backend 由 ggml_backend_load_all() 注册，
-        // 没有 backend 时 llama_model_load_from_file 直接返回 nullptr。
+        // 必须先 init：静态构建里三个 backend（CPU/OpenCL/Vulkan）由
+        // ggml_backend_load_all() 一次性注册进来，探测失败的 backend 不会注册设备。
         llama_backend_init();
         llama_log_set(llama_log_to_logcat, nullptr);
+        log_devices();
 
         llama_model_params model_params = llama_model_default_params();
-        model_params.n_gpu_layers = 0;  // 这个 APK 只带 CPU backend
+        model_params.n_gpu_layers = 0;  // 默认 CPU，下面按 gpu_backend 覆盖
 
-        session->model = llama_model_load_from_file(path.c_str(), model_params);
-        if (session->model == nullptr) {
-            LOGE("nativeLoad: llama_model_load_from_file failed");
-            release_fields(session);
-            delete session;
-            return 0;
+        // devices 要 NULL 结尾，且必须在 llama_model_load_from_file 返回前一直有效
+        // （llama 只把指针抄进 model->devices，不拷贝数组）。
+        std::vector<ggml_backend_dev_t> selected;
+        bool gpu_requested = false;
+
+        if (gpu_backend == kGpuCpuOnly) {
+            LOGI("nativeLoad: backend=CPU (forced by caller)");
+        } else {
+            const ggml_backend_dev_t dev = pick_device(gpu_backend);
+            if (dev == nullptr) {
+                if (gpu_backend == kGpuOpenCl || gpu_backend == kGpuVulkan) {
+                    // 用户显式指定了后端却没有对应设备（驱动不支持 / 后端没编进来）：
+                    // 老实失败，让 Kotlin 给出可读提示，别悄悄退到 CPU 装作成功。
+                    LOGE("nativeLoad: no %s device registered (gpu_backend=%d)",
+                         gpu_backend == kGpuOpenCl ? "OpenCL" : "Vulkan", (int) gpu_backend);
+                    release_fields(session);
+                    delete session;
+                    return 0;
+                }
+                // auto：一个 GPU 都没有，就正常用 CPU 跑。
+                LOGW("nativeLoad: no GPU device available, running on CPU");
+            } else {
+                selected.push_back(dev);
+                selected.push_back(nullptr);
+                model_params.devices = selected.data();
+                model_params.n_gpu_layers = kAllGpuLayers;
+                gpu_requested = true;
+                LOGI("nativeLoad: backend=%s device=%s n_gpu_layers=%d",
+                     ggml_backend_dev_name(dev), ggml_backend_dev_description(dev),
+                     (int) model_params.n_gpu_layers);
+            }
         }
 
-        session->vocab = llama_model_get_vocab(session->model);
-        if (session->vocab == nullptr) {
-            LOGE("nativeLoad: model has no vocab");
-            release_fields(session);
-            delete session;
-            return 0;
-        }
+        // 模型装载 + context 创建绑在一起：auto 模式下 GPU 任何一步失败（显存不够、
+        // 驱动拒绝）都要能用 CPU 再试一次，两边失败点不同但兜底逻辑一样。
+        auto load_and_init = [&](const llama_model_params & params) -> bool {
+            session->model = llama_model_load_from_file(path.c_str(), params);
+            if (session->model == nullptr) {
+                return false;
+            }
+            session->vocab = llama_model_get_vocab(session->model);
+            if (session->vocab == nullptr) {
+                return false;
+            }
+            llama_context_params ctx_params = llama_context_default_params();
+            if (n_ctx > 0) {
+                ctx_params.n_ctx = static_cast<uint32_t>(n_ctx);
+            }
+            ctx_params.n_batch = static_cast<uint32_t>(kNBatch);
+            ctx_params.n_ubatch = static_cast<uint32_t>(kNBatch);
+            if (n_threads > 0) {
+                ctx_params.n_threads = n_threads;
+                ctx_params.n_threads_batch = n_threads;
+            }
+            session->ctx = llama_init_from_model(session->model, ctx_params);
+            if (session->ctx == nullptr) {
+                LOGE("nativeLoad: llama_init_from_model failed (n_ctx=%u)", ctx_params.n_ctx);
+                return false;
+            }
+            return true;
+        };
 
-        llama_context_params ctx_params = llama_context_default_params();
-        if (n_ctx > 0) {
-            ctx_params.n_ctx = static_cast<uint32_t>(n_ctx);
+        bool loaded = load_and_init(model_params);
+        if (!loaded && gpu_requested && gpu_backend == kGpuAuto) {
+            // 显式指定 CPU / OpenCL / Vulkan 的不做这个兜底：用户要的就是那个后端，
+            // 悄悄换掉反而更难排查。
+            LOGW("nativeLoad: GPU load failed, retrying on CPU");
+            release_fields(session);  // 清掉半成品（model/vocab/ctx）
+            model_params.devices = nullptr;
+            model_params.n_gpu_layers = 0;
+            loaded = load_and_init(model_params);
         }
-        ctx_params.n_batch = static_cast<uint32_t>(kNBatch);
-        ctx_params.n_ubatch = static_cast<uint32_t>(kNBatch);
-        if (n_threads > 0) {
-            ctx_params.n_threads = n_threads;
-            ctx_params.n_threads_batch = n_threads;
-        }
-
-        session->ctx = llama_init_from_model(session->model, ctx_params);
-        if (session->ctx == nullptr) {
-            LOGE("nativeLoad: llama_init_from_model failed (n_ctx=%u)", ctx_params.n_ctx);
+        if (!loaded) {
+            LOGE("nativeLoad: model load failed (device=CPU fallback=%d)",
+                 gpu_backend == kGpuAuto ? 1 : 0);
             release_fields(session);
             delete session;
             return 0;
@@ -350,8 +512,9 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
             g_sessions.insert(session);
         }
 
-        LOGI("nativeLoad: ok n_ctx=%d n_batch=%d stop_token=%d", (int) session->n_ctx,
-             (int) session->n_batch, (int) session->stop_token);
+        LOGI("nativeLoad: ok n_ctx=%d n_batch=%d stop_token=%d n_gpu_layers=%d gpu=%d",
+             (int) session->n_ctx, (int) session->n_batch, (int) session->stop_token,
+             (int) model_params.n_gpu_layers, gpu_requested ? 1 : 0);
         return static_cast<jlong>(reinterpret_cast<intptr_t>(session));
     } catch (const std::exception & e) {
         LOGE("nativeLoad: exception: %s", e.what());
@@ -415,6 +578,7 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeGenerate(
 
         // 一次 llama_decode 喂进去的 token 数不能超过 n_batch（llama 内部是
         // GGML_ASSERT），所以 prompt 要切片投喂；位置由 llama 从 memory 里续着走。
+        const auto prompt_begin = std::chrono::steady_clock::now();
         for (size_t offset = 0; offset < tokens.size(); offset += static_cast<size_t>(session->n_batch)) {
             const int32_t chunk = static_cast<int32_t>(std::min<size_t>(
                     tokens.size() - offset, static_cast<size_t>(session->n_batch)));
@@ -425,11 +589,14 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeGenerate(
                 return nullptr;
             }
         }
+        const auto prompt_end = std::chrono::steady_clock::now();
 
         std::string output;
         output.reserve(static_cast<size_t>(max_tokens) * 4);
         llama_token sampled = 0;
         bool stopped = false;
+        // 生成阶段的 token 数（不含结束符），tok_s 就按它算。
+        int32_t gen_tokens = 0;
         for (int32_t i = 0; i < max_tokens; ++i) {
             // llama_sampler_sample 内部已经对采样结果调过 llama_sampler_accept，
             // 这里不能再 accept 一次（会把 token 记两遍，惩罚类 sampler 会算错）。
@@ -448,6 +615,7 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeGenerate(
                 throw_runtime(env, err);
                 return nullptr;
             }
+            ++gen_tokens;
 
             // 模型把结束标记当普通文本吐出来时（不是 special token），按它截断。
             const size_t marker_at = output.find(kEndOfTurn);
@@ -469,8 +637,19 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeGenerate(
             }
         }
 
-        LOGI("nativeGenerate: n_prompt=%d out_bytes=%d stopped=%d",
-             (int) tokens.size(), (int) output.size(), stopped ? 1 : 0);
+        const auto gen_end = std::chrono::steady_clock::now();
+        const long long prompt_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(prompt_end - prompt_begin).count();
+        const long long gen_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - prompt_end).count();
+        // tok_s 只算生成阶段（prompt 处理单独看 prompt_ms）。真机上按 gpuBackend 各跑
+        // 一次、logcat 里 grep 这一行就能横向对比 CPU/OpenCL/Vulkan。
+        const double tok_s =
+                gen_ms > 0 ? static_cast<double>(gen_tokens) * 1000.0 / static_cast<double>(gen_ms) : 0.0;
+        LOGI("nativeGenerate: n_prompt=%d prompt_ms=%lld gen_tokens=%d gen_ms=%lld tok_s=%.2f "
+             "out_bytes=%d stopped=%d",
+             (int) tokens.size(), prompt_ms, (int) gen_tokens, gen_ms, tok_s, (int) output.size(),
+             stopped ? 1 : 0);
         return to_jstring(env, output);
     } catch (const std::exception & e) {
         throw_runtime(env, std::string("ERR_NATIVE: ") + e.what());

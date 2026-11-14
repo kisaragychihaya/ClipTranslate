@@ -15,6 +15,7 @@ class LocalTranslateException(message: String) : Exception(message)
  * TranslateGemma 4B（GGUF）的本地推理器。
  *
  * 懒加载：第一次翻译时才 `ensureLoaded()` → `nativeLoad()`，之后复用 handle；
+ * 用户在设置里改了加速方式时，下一次翻译会在 [Mutex] 内卸载旧 handle 并按新后端重载。
  * llama.cpp 的 context 不能并发使用，所以整条调用链用 [Mutex] 串行化。
  * 装载失败（APK 没内置 `.so`、内存不足、模型文件缺失）一律抛 [LocalTranslateException]，
  * 由上层降级成错误提示，不会影响在线翻译。
@@ -27,11 +28,15 @@ class LocalTranslator private constructor(context: Context) {
     /**
      * native handle；0 表示尚未加载。只在 [mutex] 内读写。
      *
-     * 刻意不主动调用 [LlamaBridge.nativeUnload]：卸载时若还有生成在跑会让 native 侧出现
-     * use-after-free，而 handle 的生命周期跟着进程走、对用户没有可见影响。
+     * 只有「加速方式被用户改过」时才主动 [LlamaBridge.nativeUnload]（见 [ensureHandle]）：
+     * 卸载时若还有生成在跑会让 native 侧出现 use-after-free，而所有读写都在 [mutex] 内，
+     * 这里卸载时不可能有生成在跑。其余情况 handle 的生命周期跟着进程走，对用户没有可见影响：
      * 模型被删除又重新下载后 handle 仍指向已删除的旧文件，但内容同一个 SHA256，等价于同一个模型。
      */
     private var handle: Long = 0L
+
+    /** [handle] 是用哪个加速方式加载的；[handle] 为 0 时为 null。只在 [mutex] 内读写。 */
+    private var handleBackend: GpuBackend? = null
 
     /** 阻塞式翻译；内部已切到 [Dispatchers.IO]，UI 层直接 await 即可。 */
     suspend fun translate(text: String, targetCode: String): String = withContext(Dispatchers.IO) {
@@ -52,7 +57,15 @@ class LocalTranslator private constructor(context: Context) {
     // --- 加载 ---------------------------------------------------------------
 
     private fun ensureHandle(): Long {
-        if (handle != 0L) return handle
+        LocalSettings.attach(appContext)
+        val backend = LocalSettings.gpuBackend.value
+        if (handle != 0L) {
+            if (handleBackend == backend) return handle
+            // 加速方式改了：旧 handle 仍按老后端工作，必须在 mutex 内卸掉再按新设置重载。
+            LlamaBridge.nativeUnload(handle)
+            handle = 0L
+            handleBackend = null
+        }
         if (!LlamaBridge.ensureLoaded()) {
             throw LocalTranslateException(
                 "本地推理库未内置在此安装包中（缺少 libcliptranslate_jni.so），请安装 CI 构建的版本",
@@ -64,12 +77,21 @@ class LocalTranslator private constructor(context: Context) {
             throw LocalTranslateException("本地模型文件不存在，请先在设置中下载")
         }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)
-        val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE)
+        val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE, backend.value)
         if (loaded == 0L) {
-            throw LocalTranslateException("本地模型加载失败（内存不足或模型文件损坏）")
+            throw LocalTranslateException(loadFailureMessage(backend))
         }
         handle = loaded
+        handleBackend = backend
         return loaded
+    }
+
+    /** 显式选了 GPU 后端还加载失败，多半是该后端在这台机器上不可用，提示换一种方式。 */
+    private fun loadFailureMessage(backend: GpuBackend): String = when (backend) {
+        GpuBackend.OPENCL, GpuBackend.VULKAN ->
+            "所选 GPU 后端不可用，请切换加速方式或改用 CPU"
+
+        else -> "本地模型加载失败（内存不足或模型文件损坏）"
     }
 
     /** 4B Q4_K_M 常驻约 3GB，加载前先看可用内存，不够就给可读提示而不是被系统杀掉。 */

@@ -7,6 +7,7 @@ import dev.cliptranslate.data.ModelInfo
 import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
 import dev.cliptranslate.data.isBuiltin
+import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.LocalSettings
 import dev.cliptranslate.local.ModelManager
 import dev.cliptranslate.local.ModelState
@@ -45,6 +46,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     /** 「启用本地离线翻译」开关（持久化在 app_prefs，与翻译页共享）。 */
     val localEnabled: StateFlow<Boolean> = LocalSettings.enabled
+
+    /** 「加速方式」（持久化在 app_prefs，与翻译页共享；改动后本地推理会卸载重载）。 */
+    val gpuBackend: StateFlow<GpuBackend> = LocalSettings.gpuBackend
 
     private val _isFetching = MutableStateFlow(false)
     val isFetching: StateFlow<Boolean> = _isFetching.asStateFlow()
@@ -86,6 +90,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun setLocalEnabled(enabled: Boolean) {
         LocalSettings.setEnabled(app, enabled)
+    }
+
+    fun setGpuBackend(backend: GpuBackend) {
+        LocalSettings.setGpuBackend(app, backend)
     }
 
     /** 页面回到前台时对一遍磁盘，避免下载过程中进程被杀导致状态卡在「下载中」。 */

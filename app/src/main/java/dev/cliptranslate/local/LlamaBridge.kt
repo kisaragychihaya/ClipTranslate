@@ -20,7 +20,11 @@ object LlamaBridge {
         } catch (t: Throwable) { false }
     }
 
-    external fun nativeLoad(modelPath: String, nThreads: Int, nCtx: Int): Long
+    /**
+     * @param gpuBackend 0=自动（GPU 优先）/ 1=仅 CPU / 2=OpenCL / 3=Vulkan，见 [GpuBackend]。
+     *   返回 0 表示加载失败（含所选 GPU 后端不可用）。
+     */
+    external fun nativeLoad(modelPath: String, nThreads: Int, nCtx: Int, gpuBackend: Int): Long
     external fun nativeGenerate(handle: Long, prompt: String, maxTokens: Int): String
     external fun nativeUnload(handle: Long)
 }

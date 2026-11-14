@@ -12,12 +12,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -35,11 +40,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cliptranslate.R
 import dev.cliptranslate.data.Provider
+import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.ModelManager
 import dev.cliptranslate.local.ModelState
 import java.util.Locale
@@ -58,6 +65,7 @@ fun SettingsScreen(
     val modelState by vm.modelState.collectAsStateWithLifecycle()
     val hasPartialModel by vm.hasPartialModel.collectAsStateWithLifecycle()
     val localEnabled by vm.localEnabled.collectAsStateWithLifecycle()
+    val gpuBackend by vm.gpuBackend.collectAsStateWithLifecycle()
 
     var pendingDelete by remember { mutableStateOf<Provider?>(null) }
     var pendingModelDelete by remember { mutableStateOf(false) }
@@ -94,10 +102,12 @@ fun SettingsScreen(
                     state = modelState,
                     hasPartial = hasPartialModel,
                     enabled = localEnabled,
+                    gpuBackend = gpuBackend,
                     onDownload = { vm.downloadModel() },
                     onCancel = { vm.cancelModelDownload() },
                     onDelete = { pendingModelDelete = true },
                     onToggleEnabled = { vm.setLocalEnabled(it) },
+                    onSelectGpuBackend = { vm.setGpuBackend(it) },
                 )
             }
 
@@ -213,7 +223,7 @@ fun SettingsScreen(
 }
 
 /**
- * 「本地模型（离线翻译）」卡片：状态行 + 下载/取消/删除按钮 + 启用开关。
+ * 「本地模型（离线翻译）」卡片：状态行 + 下载/取消/删除按钮 + 启用开关 + 加速方式。
  * 放在 Provider 列表上方，因为它是内置的、不需要任何配置。
  */
 @Composable
@@ -221,10 +231,12 @@ private fun LocalModelCard(
     state: ModelState,
     hasPartial: Boolean,
     enabled: Boolean,
+    gpuBackend: GpuBackend,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
     onToggleEnabled: (Boolean) -> Unit,
+    onSelectGpuBackend: (GpuBackend) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -291,9 +303,72 @@ private fun LocalModelCard(
                 }
                 Switch(checked = enabled, onCheckedChange = onToggleEnabled)
             }
+
+            HorizontalDivider()
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = stringResource(R.string.local_model_gpu_backend),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                GpuBackendSelector(selected = gpuBackend, onSelect = onSelectGpuBackend)
+                Text(
+                    text = stringResource(R.string.local_model_gpu_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
+
+/** 加速方式下拉：沿用翻译页 DropdownField 的样式（OutlinedButton + DropdownMenu）。 */
+@Composable
+private fun GpuBackendSelector(selected: GpuBackend, onSelect: (GpuBackend) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = gpuBackendLabel(selected),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            GpuBackend.entries.forEach { backend ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = gpuBackendLabel(backend),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(backend)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** [GpuBackend] → 中文选项文案。 */
+@Composable
+private fun gpuBackendLabel(backend: GpuBackend): String = stringResource(
+    when (backend) {
+        GpuBackend.AUTO -> R.string.local_model_gpu_auto
+        GpuBackend.CPU -> R.string.local_model_gpu_cpu
+        GpuBackend.OPENCL -> R.string.local_model_gpu_opencl
+        GpuBackend.VULKAN -> R.string.local_model_gpu_vulkan
+    },
+)
 
 /** 状态行：未下载 / 下载中（进度条 + 百分比 + MB）/ 校验中 / 已就绪 · 2.32 GB / 错误信息。 */
 @Composable
