@@ -1,7 +1,5 @@
 package dev.cliptranslate.ui.settings
 
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,25 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,7 +19,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -50,8 +28,29 @@ import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.ModelManager
 import dev.cliptranslate.local.ModelState
 import java.util.Locale
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.DropdownEntry
+import top.yukonga.miuix.kmp.basic.DropdownItem
+import top.yukonga.miuix.kmp.basic.FloatingActionButton
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.SmallTopAppBar
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Add
+import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.menu.OverlayDropdownMenu
+import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
@@ -77,16 +76,22 @@ fun SettingsScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("设置") },
+            SmallTopAppBar(
+                title = "设置",
                 navigationIcon = {
-                    TextButton(onClick = onBack) { Text("返回") }
+                    IconButton(onClick = onBack) {
+                        Icon(imageVector = MiuixIcons.Back, contentDescription = "返回")
+                    }
                 },
             )
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { vm.startCreate() }) {
-                Text(text = "+", style = MaterialTheme.typography.headlineSmall)
+                Icon(
+                    imageVector = MiuixIcons.Add,
+                    contentDescription = "+",
+                    tint = MiuixTheme.colorScheme.onPrimary,
+                )
             }
         },
     ) { innerPadding ->
@@ -125,12 +130,12 @@ fun SettingsScreen(
                         ) {
                             Text(
                                 text = "还没有配置 Provider",
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MiuixTheme.textStyles.title4,
                             )
                             Text(
                                 text = "点击右下角 + 添加一个 OpenAI 兼容服务",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MiuixTheme.textStyles.body2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                             )
                         }
                     }
@@ -145,80 +150,97 @@ fun SettingsScreen(
                 }
             }
         }
-    }
 
-    pendingDelete?.let { target ->
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("删除 Provider") },
-            text = { Text("确定要删除「${target.name.ifBlank { "未命名 Provider" }}」吗？删除后需要重新配置。") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        vm.delete(target.id)
-                        pendingDelete = null
-                    },
+        // Overlay 系列弹层/对话框都要放在 Scaffold 内部，才能被 Scaffold 的 popupHost 托管。
+        pendingDelete?.let { target ->
+            OverlayDialog(
+                show = true,
+                title = "删除 Provider",
+                summary = "确定要删除「${target.name.ifBlank { "未命名 Provider" }}」吗？删除后需要重新配置。",
+                onDismissRequest = { pendingDelete = null },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("删除")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
-            },
-        )
-    }
-
-    if (pendingModelDelete) {
-        AlertDialog(
-            onDismissRequest = { pendingModelDelete = false },
-            title = { Text(stringResource(R.string.local_model_delete_title)) },
-            text = {
-                Text(
-                    stringResource(
-                        R.string.local_model_delete_message,
-                        formatBytes(ModelManager.MODEL_SIZE_BYTES),
+                    TextButton(
+                        text = "取消",
+                        onClick = { pendingDelete = null },
+                        modifier = Modifier.weight(1f),
                     )
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        vm.deleteModel()
-                        pendingModelDelete = false
-                    },
-                ) {
-                    Text(stringResource(R.string.local_model_delete_confirm))
+                    Button(
+                        onClick = {
+                            vm.delete(target.id)
+                            pendingDelete = null
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                    ) {
+                        Text("删除")
+                    }
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingModelDelete = false }) {
-                    Text(stringResource(R.string.local_model_cancel))
-                }
-            },
-        )
-    }
+            }
+        }
 
-    val editor = editing
-    val fetched = fetchResult
-    if (editor != null && fetched != null) {
-        // 模型选择弹窗盖在编辑弹窗之上：确认后两层一起关闭，取消则回到编辑弹窗（草稿保留）。
-        val existingIds = editor.models.map { it.id }.toSet()
-        ModelPickerSheet(
-            models = fetched,
-            initiallySelected = fetched.map { it.id }.filter { it !in existingIds }.toSet(),
-            onApply = { selectedIds -> vm.applyFetchedModels(vm.editing.value ?: editor, selectedIds) },
-            onDismiss = { vm.dismissModelPicker() },
-        )
-    } else if (editor != null) {
-        ProviderEditorSheet(
-            provider = editor,
-            isFetching = isFetching,
-            fetchError = fetchError,
-            onFetch = { vm.fetchModels(vm.editing.value ?: editor) },
-            onSave = { provider -> vm.save(provider) },
-            onDismiss = { vm.dismissEditor() },
-            onDraftChange = { provider -> vm.updateEditing(provider) },
-        )
+        if (pendingModelDelete) {
+            OverlayDialog(
+                show = true,
+                title = stringResource(R.string.local_model_delete_title),
+                summary = stringResource(
+                    R.string.local_model_delete_message,
+                    formatBytes(ModelManager.MODEL_SIZE_BYTES),
+                ),
+                onDismissRequest = { pendingModelDelete = false },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        text = stringResource(R.string.local_model_cancel),
+                        onClick = { pendingModelDelete = false },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        onClick = {
+                            vm.deleteModel()
+                            pendingModelDelete = false
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                    ) {
+                        Text(stringResource(R.string.local_model_delete_confirm))
+                    }
+                }
+            }
+        }
+
+        val editor = editing
+        val fetched = fetchResult
+        if (editor != null && fetched != null) {
+            // 模型选择弹窗盖在编辑弹窗之上：确认后两层一起关闭，取消则回到编辑弹窗（草稿保留）。
+            val existingIds = editor.models.map { it.id }.toSet()
+            ModelPickerSheet(
+                models = fetched,
+                initiallySelected = fetched.map { it.id }.filter { it !in existingIds }.toSet(),
+                onApply = { selectedIds ->
+                    vm.applyFetchedModels(vm.editing.value ?: editor, selectedIds)
+                },
+                onDismiss = { vm.dismissModelPicker() },
+            )
+        } else if (editor != null) {
+            ProviderEditorSheet(
+                provider = editor,
+                isFetching = isFetching,
+                fetchError = fetchError,
+                onFetch = { vm.fetchModels(vm.editing.value ?: editor) },
+                onSave = { provider -> vm.save(provider) },
+                onDismiss = { vm.dismissEditor() },
+                onDraftChange = { provider -> vm.updateEditing(provider) },
+            )
+        }
     }
 }
 
@@ -247,12 +269,12 @@ private fun LocalModelCard(
         ) {
             Text(
                 text = stringResource(R.string.local_model_title),
-                style = MaterialTheme.typography.titleMedium,
+                style = MiuixTheme.textStyles.title4,
             )
             Text(
                 text = stringResource(R.string.local_model_desc),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
 
             HorizontalDivider()
@@ -262,13 +284,19 @@ private fun LocalModelCard(
             // 校验中不提供按钮：算 SHA256 打断不了，给了按钮也是摆设。
             when (state) {
                 is ModelState.Downloading -> {
-                    OutlinedButton(onClick = onCancel) {
+                    Button(
+                        onClick = onCancel,
+                        colors = ButtonDefaults.buttonColors(),
+                    ) {
                         Text(stringResource(R.string.local_model_cancel))
                     }
                 }
 
                 is ModelState.Ready -> {
-                    OutlinedButton(onClick = onDelete) {
+                    Button(
+                        onClick = onDelete,
+                        colors = ButtonDefaults.buttonColors(),
+                    ) {
                         Text(stringResource(R.string.local_model_delete))
                     }
                 }
@@ -276,85 +304,52 @@ private fun LocalModelCard(
                 is ModelState.Verifying -> Unit
 
                 else -> {
-                    Button(onClick = onDownload) {
+                    Button(
+                        onClick = onDownload,
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                    ) {
                         Text(
                             stringResource(
-                                if (hasPartial) R.string.local_model_resume else R.string.local_model_download
-                            )
+                                if (hasPartial) {
+                                    R.string.local_model_resume
+                                } else {
+                                    R.string.local_model_download
+                                },
+                            ),
                         )
                     }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.local_model_enable),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    Text(
-                        text = stringResource(R.string.local_model_enable_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = enabled, onCheckedChange = onToggleEnabled)
-            }
+            SwitchPreference(
+                title = stringResource(R.string.local_model_enable),
+                summary = stringResource(R.string.local_model_enable_desc),
+                checked = enabled,
+                onCheckedChange = onToggleEnabled,
+                insideMargin = PaddingValues(0.dp),
+            )
 
             HorizontalDivider()
 
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = stringResource(R.string.local_model_gpu_backend),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                GpuBackendSelector(selected = gpuBackend, onSelect = onSelectGpuBackend)
-                Text(
-                    text = stringResource(R.string.local_model_gpu_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-/** 加速方式下拉：沿用翻译页 DropdownField 的样式（OutlinedButton + DropdownMenu）。 */
-@Composable
-private fun GpuBackendSelector(selected: GpuBackend, onSelect: (GpuBackend) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box(modifier = Modifier.fillMaxWidth()) {
-        OutlinedButton(
-            onClick = { expanded = true },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                text = gpuBackendLabel(selected),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            GpuBackend.entries.forEach { backend ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
+            OverlayDropdownMenu(
+                title = stringResource(R.string.local_model_gpu_backend),
+                summary = gpuBackendLabel(gpuBackend),
+                entry = DropdownEntry(
+                    items = GpuBackend.entries.map { backend ->
+                        DropdownItem(
                             text = gpuBackendLabel(backend),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            selected = backend == gpuBackend,
+                            onClick = { onSelectGpuBackend(backend) },
                         )
                     },
-                    onClick = {
-                        expanded = false
-                        onSelect(backend)
-                    },
-                )
-            }
+                ),
+                insideMargin = PaddingValues(horizontal = 0.dp, vertical = 6.dp),
+            )
+            Text(
+                text = stringResource(R.string.local_model_gpu_hint),
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
         }
     }
 }
@@ -377,8 +372,8 @@ private fun LocalModelStatus(state: ModelState) {
         is ModelState.NotDownloaded -> {
             Text(
                 text = stringResource(R.string.local_model_status_not_downloaded),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
         }
 
@@ -389,7 +384,7 @@ private fun LocalModelStatus(state: ModelState) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = stringResource(R.string.local_model_status_downloading),
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MiuixTheme.textStyles.body2,
                         modifier = Modifier.weight(1f),
                     )
                     Text(
@@ -399,12 +394,12 @@ private fun LocalModelStatus(state: ModelState) {
                             state.downloadedBytes / MEBIBYTE,
                             total / MEBIBYTE,
                         ),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.primary,
                     )
                 }
                 LinearProgressIndicator(
-                    progress = { percent / 100f },
+                    progress = percent / 100f,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -413,8 +408,8 @@ private fun LocalModelStatus(state: ModelState) {
         is ModelState.Verifying -> {
             Text(
                 text = stringResource(R.string.local_model_status_verifying),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
         }
 
@@ -424,22 +419,21 @@ private fun LocalModelStatus(state: ModelState) {
                     R.string.local_model_status_ready,
                     formatBytes(ModelManager.MODEL_SIZE_BYTES),
                 ),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary,
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.primary,
             )
         }
 
         is ModelState.Error -> {
             Text(
                 text = state.message,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.error,
             )
         }
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProviderCard(
     provider: Provider,
@@ -447,35 +441,34 @@ private fun ProviderCard(
     onRequestDelete: () -> Unit,
 ) {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onRequestDelete),
+        modifier = Modifier.fillMaxWidth(),
+        insideMargin = PaddingValues(16.dp),
+        pressFeedbackType = PressFeedbackType.Sink,
+        onClick = onClick,
+        onLongPress = onRequestDelete,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = provider.name.ifBlank { "未命名 Provider" },
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = onRequestDelete) { Text("删除") }
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = provider.baseUrl,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = provider.name.ifBlank { "未命名 Provider" },
+                style = MiuixTheme.textStyles.title4,
+                modifier = Modifier.weight(1f),
             )
-            Text(
-                text = providerSummary(provider),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
+            TextButton(
+                text = "删除",
+                onClick = onRequestDelete,
+                insideMargin = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
             )
         }
+        Text(
+            text = provider.baseUrl,
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+        Text(
+            text = providerSummary(provider),
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.primary,
+        )
     }
 }
 

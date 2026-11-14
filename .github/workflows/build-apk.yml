@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ["v*"]
 
 jobs:
   build:
@@ -27,7 +28,7 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: "14742923"
-          packages: "platforms;android-36 build-tools;36.0.0 platform-tools cmake;3.22.1 ndk;27.3.13750724"
+          packages: "platforms;android-36 platforms;android-37 build-tools;36.0.0 platform-tools cmake;3.22.1 ndk;27.3.13750724"
           log-accepted-android-sdk-licenses: false
 
       - name: Grant execute permission for gradlew
@@ -105,12 +106,39 @@ jobs:
 
       # debug 包用于 ADB 真机验证本地推理：debuggable 才能 run-as 把 GGUF 推进
       # /data/data/dev.cliptranslate/files/ 里，且不受 release 签名配置影响。
+      # 发布 tag 时不构建 debug 包。
       - name: Build Debug APK
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: ./gradlew :app:assembleDebug --stacktrace
 
       - name: Upload Debug APK artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: cliptranslate-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 7
+
+  # 打 v* tag 时自动发布 GitHub Release，挂上 Release APK。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Release APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cliptranslate-release-apk
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          apk=$(ls *.apk | head -1)
+          echo "attach: $apk"
+          gh release create "${GITHUB_REF_NAME}" "$apk" \
+            --title "模译 ${GITHUB_REF_NAME}" \
+            --generate-notes
