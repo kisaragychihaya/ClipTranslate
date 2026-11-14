@@ -67,8 +67,9 @@ class LocalTranslator private constructor(context: Context) {
             handleBackend = null
         }
         if (!LlamaBridge.ensureLoaded()) {
+            val detail = LlamaBridge.lastLoadError?.let { "（$it）" } ?: ""
             throw LocalTranslateException(
-                "本地推理库未内置在此安装包中（缺少 libcliptranslate_jni.so），请安装 CI 构建的版本",
+                "本地推理库加载失败$detail，请安装最新 CI 构建的版本",
             )
         }
         checkAvailableMemory()

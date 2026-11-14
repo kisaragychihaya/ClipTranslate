@@ -9,15 +9,47 @@ package dev.cliptranslate.local
 object LlamaBridge {
     @Volatile private var loaded = false
 
-    /** 尝试加载 native 库；APK 未内置 .so 时返回 false 而不是崩溃。 */
+    /** 最近一次 loadLibrary 失败的原因（dlopen 报错原文），用于界面诊断展示。 */
+    @Volatile var lastLoadError: String? = null
+        private set
+
+    /** 尝试加载 native 库；APK 未内置 .so 或依赖解析失败时返回 false 而不是崩溃。 */
     @Synchronized
     fun ensureLoaded(): Boolean {
         if (loaded) return true
+        preloadVendorOpenCL()
         return try {
             System.loadLibrary("cliptranslate_jni")
             loaded = true
             true
-        } catch (t: Throwable) { false }
+        } catch (t: Throwable) {
+            lastLoadError = t.message
+            false
+        }
+    }
+
+    /**
+     * libcliptranslate_jni.so 对 libOpenCL.so 是 DT_NEEDED 硬依赖（链接桩的 SONAME）。
+     * 高通设备的 libOpenCL.so 在 /vendor/lib64，应用命名空间按名字搜不到；
+     * 它登记在 /vendor/etc/public.libraries.txt，允许应用按绝对路径加载。
+     * 预先 System.load 进来后，linker 会复用已加载的同名库，DT_NEEDED 得以解析。
+     * 非高通设备预载全部失败也无妨：后续 loadLibrary 失败会走 ensureLoaded=false 的可读提示。
+     */
+    private fun preloadVendorOpenCL() {
+        val candidates = listOf(
+            "/vendor/lib64/libOpenCL.so",
+            "/system_ext/lib64/libOpenCL.so",
+            "/system/vendor/lib64/libOpenCL.so",
+            "/vendor/lib64/egl/libOpenCL.so",
+        )
+        for (path in candidates) {
+            try {
+                System.load(path)
+                return
+            } catch (t: Throwable) {
+                // 试下一个候选路径
+            }
+        }
     }
 
     /**
