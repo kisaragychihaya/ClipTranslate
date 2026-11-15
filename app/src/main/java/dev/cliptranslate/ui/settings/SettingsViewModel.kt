@@ -9,6 +9,8 @@ import dev.cliptranslate.data.ProviderRepository
 import dev.cliptranslate.data.isBuiltin
 import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.LocalSettings
+import dev.cliptranslate.local.LocalTranslateException
+import dev.cliptranslate.local.LocalTranslator
 import dev.cliptranslate.local.ModelManager
 import dev.cliptranslate.local.ModelState
 import dev.cliptranslate.net.OpenAiClient
@@ -47,8 +49,16 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     /** 「启用本地离线翻译」开关（持久化在 app_prefs，与翻译页共享）。 */
     val localEnabled: StateFlow<Boolean> = LocalSettings.enabled
 
-    /** 「加速方式」（持久化在 app_prefs，与翻译页共享；改动后本地推理会卸载重载）。 */
+    /** 「加速方式」（持久化在 app_prefs，与翻译页共享；改动后立即卸载旧模型并按新后端重载）。 */
     val gpuBackend: StateFlow<GpuBackend> = LocalSettings.gpuBackend
+
+    /** 正在按新加速方式卸载/重载本地模型。 */
+    private val _backendSwitching = MutableStateFlow(false)
+    val backendSwitching: StateFlow<Boolean> = _backendSwitching.asStateFlow()
+
+    /** 切换加速方式失败的原因；null 表示没有错误。 */
+    private val _backendSwitchError = MutableStateFlow<String?>(null)
+    val backendSwitchError: StateFlow<String?> = _backendSwitchError.asStateFlow()
 
     private val _isFetching = MutableStateFlow(false)
     val isFetching: StateFlow<Boolean> = _isFetching.asStateFlow()
@@ -92,8 +102,32 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         LocalSettings.setEnabled(app, enabled)
     }
 
+    /**
+     * 先落盘再触发卸载+重载：用户改完加速方式当场就能看到该后端可不可用，
+     * 而不是等到下一次翻译才在翻译锁里失败。
+     *
+     * 连续快速切换时两个重载协程会串行在推理锁上，由
+     * [LocalTranslator.reloadForBackendChange] 锁内的幂等检查自然去重。
+     */
     fun setGpuBackend(backend: GpuBackend) {
+        val previous = LocalSettings.gpuBackend.value
         LocalSettings.setGpuBackend(app, backend)
+        if (backend == previous) return
+
+        viewModelScope.launch {
+            _backendSwitching.value = true
+            _backendSwitchError.value = null
+            try {
+                val failure = LocalTranslator.get(app).reloadForBackendChange().exceptionOrNull()
+                if (failure != null) {
+                    _backendSwitchError.value = describeBackendFailure(failure)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } finally {
+                _backendSwitching.value = false
+            }
+        }
     }
 
     /** 页面回到前台时对一遍磁盘，避免下载过程中进程被杀导致状态卡在「下载中」。 */
@@ -213,6 +247,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
         save(provider.copy(models = merged, defaultModelId = defaultId))
     }
+
+    /** 改加速方式失败的提示：[LocalTranslateException] 的 message 本身就是给人看的说明。 */
+    private fun describeBackendFailure(e: Throwable): String =
+        (e as? LocalTranslateException)?.message ?: "切换加速方式失败，请稍后重试"
 
     private fun describeFailure(e: Exception): String {
         val code = (e as? OpenAiException)?.httpCode

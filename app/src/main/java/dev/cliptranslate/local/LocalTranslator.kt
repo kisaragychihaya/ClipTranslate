@@ -15,7 +15,8 @@ class LocalTranslateException(message: String) : Exception(message)
  * TranslateGemma 4B（GGUF）的本地推理器。
  *
  * 懒加载：第一次翻译时才 `ensureLoaded()` → `nativeLoad()`，之后复用 handle；
- * 用户在设置里改了加速方式时，下一次翻译会在 [Mutex] 内卸载旧 handle 并按新后端重载。
+ * 用户在设置里改了加速方式时，[reloadForBackendChange] 会在 [Mutex] 内立即卸掉旧 handle
+ * 并按新后端重载（[ensureHandle] 保留同样的兜底逻辑，防止设置不是从设置页写进来的）。
  * llama.cpp 的 context 不能并发使用，所以整条调用链用 [Mutex] 串行化。
  * 装载失败（APK 没内置 `.so`、内存不足、模型文件缺失）一律抛 [LocalTranslateException]，
  * 由上层降级成错误提示，不会影响在线翻译。
@@ -28,7 +29,8 @@ class LocalTranslator private constructor(context: Context) {
     /**
      * native handle；0 表示尚未加载。只在 [mutex] 内读写。
      *
-     * 只有「加速方式被用户改过」时才主动 [LlamaBridge.nativeUnload]（见 [ensureHandle]）：
+     * 只有「加速方式被用户改过」时才主动 [LlamaBridge.nativeUnload]（见 [reloadForBackendChange]
+     * 与 [ensureHandle]）：
      * 卸载时若还有生成在跑会让 native 侧出现 use-after-free，而所有读写都在 [mutex] 内，
      * 这里卸载时不可能有生成在跑。其余情况 handle 的生命周期跟着进程走，对用户没有可见影响：
      * 模型被删除又重新下载后 handle 仍指向已删除的旧文件，但内容同一个 SHA256，等价于同一个模型。
@@ -54,6 +56,32 @@ class LocalTranslator private constructor(context: Context) {
         }
     }
 
+    // --- 加速方式切换 -------------------------------------------------------
+
+    /**
+     * 加速方式变更后立即卸掉旧模型并按新后端重载，让用户当场知道所选后端能不能用。
+     *
+     * 只有模型本来就装载着才重载；没装载时保持懒加载（仅改设置不该白占约 3GB 常驻内存），
+     * 下一次翻译会走 [ensureHandle] 按新设置加载。
+     * 幂等：handle 已经是当前设置的后端时直接返回成功，快速连点只会真正重载一次。
+     * 失败返回 [Result.failure]，此时 [handle] 已归零，不会留下半成品。
+     */
+    suspend fun reloadForBackendChange(): Result<Unit> = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            LocalSettings.attach(appContext)
+            val backend = LocalSettings.gpuBackend.value
+            if (handle == 0L || handleBackend == backend) return@withLock Result.success(Unit)
+            // 先卸再装：峰值内存只驻留一份模型。
+            unloadLocked()
+            try {
+                loadLocked(backend)
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+    }
+
     // --- 加载 ---------------------------------------------------------------
 
     private fun ensureHandle(): Long {
@@ -62,10 +90,26 @@ class LocalTranslator private constructor(context: Context) {
         if (handle != 0L) {
             if (handleBackend == backend) return handle
             // 加速方式改了：旧 handle 仍按老后端工作，必须在 mutex 内卸掉再按新设置重载。
-            LlamaBridge.nativeUnload(handle)
-            handle = 0L
-            handleBackend = null
+            unloadLocked()
         }
+        return loadLocked(backend)
+    }
+
+    /** 卸掉当前 handle 并归零；只在 [mutex] 内调用。 */
+    private fun unloadLocked() {
+        if (handle == 0L) return
+        LlamaBridge.nativeUnload(handle)
+        handle = 0L
+        handleBackend = null
+    }
+
+    /**
+     * 按 [backend] 装一份新 handle；只在 [mutex] 内调用。
+     *
+     * 失败抛 [LocalTranslateException]；[handle] 只在 nativeLoad 成功后才写入，
+     * 所以失败时不会留下半成品（旧 handle 由调用方先行 [unloadLocked]）。
+     */
+    private fun loadLocked(backend: GpuBackend): Long {
         if (!LlamaBridge.ensureLoaded()) {
             val detail = LlamaBridge.lastLoadError?.let { "（$it）" } ?: ""
             throw LocalTranslateException(

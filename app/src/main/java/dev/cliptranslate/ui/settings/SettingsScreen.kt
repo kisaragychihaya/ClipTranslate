@@ -31,6 +31,7 @@ import java.util.Locale
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.FloatingActionButton
 import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
@@ -63,6 +64,8 @@ fun SettingsScreen(
     val hasPartialModel by vm.hasPartialModel.collectAsStateWithLifecycle()
     val localEnabled by vm.localEnabled.collectAsStateWithLifecycle()
     val gpuBackend by vm.gpuBackend.collectAsStateWithLifecycle()
+    val backendSwitching by vm.backendSwitching.collectAsStateWithLifecycle()
+    val backendSwitchError by vm.backendSwitchError.collectAsStateWithLifecycle()
 
     var pendingDelete by remember { mutableStateOf<Provider?>(null) }
     var pendingModelDelete by remember { mutableStateOf(false) }
@@ -106,6 +109,8 @@ fun SettingsScreen(
                     hasPartial = hasPartialModel,
                     enabled = localEnabled,
                     gpuBackend = gpuBackend,
+                    backendSwitching = backendSwitching,
+                    backendSwitchError = backendSwitchError,
                     onDownload = { vm.downloadModel() },
                     onCancel = { vm.cancelModelDownload() },
                     onDelete = { pendingModelDelete = true },
@@ -243,7 +248,7 @@ fun SettingsScreen(
 }
 
 /**
- * 「本地模型（离线翻译）」卡片：状态行 + 下载/取消/删除按钮 + 启用开关 + 加速方式。
+ * 「本地模型（离线翻译）」卡片：状态行 + 下载/取消/删除按钮 + 启用开关 + 加速方式（含切换进度与失败提示）。
  * 放在 Provider 列表上方，因为它是内置的、不需要任何配置。
  */
 @Composable
@@ -252,6 +257,8 @@ private fun LocalModelCard(
     hasPartial: Boolean,
     enabled: Boolean,
     gpuBackend: GpuBackend,
+    backendSwitching: Boolean,
+    backendSwitchError: String?,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
@@ -345,6 +352,28 @@ private fun LocalModelCard(
                 style = MiuixTheme.textStyles.footnote2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
+
+            if (backendSwitching) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(size = 16.dp, strokeWidth = 2.dp)
+                    Text(
+                        text = "正在切换推理硬件…",
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+            }
+
+            backendSwitchError?.let { message ->
+                Text(
+                    text = message,
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.error,
+                )
+            }
         }
     }
 }
