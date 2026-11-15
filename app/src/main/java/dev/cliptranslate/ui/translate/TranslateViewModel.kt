@@ -10,6 +10,7 @@ import dev.cliptranslate.core.TextUtil
 import dev.cliptranslate.data.LOCAL_PROVIDER_ID
 import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
+import dev.cliptranslate.local.LocalModelRequirements
 import dev.cliptranslate.local.LocalSettings
 import dev.cliptranslate.local.LocalTranslateException
 import dev.cliptranslate.local.LocalTranslator
@@ -138,11 +139,12 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refreshProviders() {
         val localEnabled = LocalSettings.enabled.value
+        val localSupported = LocalModelRequirements.isSupported(app)
         viewModelScope.launch {
             val providers = withContext(Dispatchers.IO) {
                 runCatching { repository.load() }.getOrDefault(emptyList())
-                    // 关掉「启用本地离线翻译」时，主界面的服务商列表里不出现内置本地 Provider。
-                    .filter { it.id != LOCAL_PROVIDER_ID || localEnabled }
+                    // 关掉「启用本地离线翻译」或本机内存不够时，主界面的服务商列表里不出现内置本地 Provider。
+                    .filter { it.id != LOCAL_PROVIDER_ID || (localEnabled && localSupported) }
             }
             _state.update { current ->
                 val provider = providers.firstOrNull { it.id == current.providerId }
@@ -189,6 +191,10 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         val model = snapshot.effectiveModelId.orEmpty()
         if (isLocal) {
             // 本地链路不依赖模型 id，但必须有下载好且校验通过的模型文件。
+            if (!LocalModelRequirements.isSupported(app)) {
+                _state.update { it.copy(error = "本机内存不足，无法使用本地模型") }
+                return
+            }
             if (modelManager.state.value !is ModelState.Ready) {
                 _state.update { it.copy(error = "请先在设置中下载本地模型") }
                 return

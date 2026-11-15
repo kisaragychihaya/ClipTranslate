@@ -28,6 +28,7 @@ import dev.cliptranslate.data.Provider
 import dev.cliptranslate.local.DevSettings
 import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.LlamaBridge
+import dev.cliptranslate.local.LocalModelRequirements
 import dev.cliptranslate.local.ModelManager
 import dev.cliptranslate.local.ModelState
 import java.util.Locale
@@ -114,20 +115,23 @@ fun SettingsScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item(key = "local-model") {
-                LocalModelCard(
-                    state = modelState,
-                    hasPartial = hasPartialModel,
-                    enabled = localEnabled,
-                    gpuBackend = gpuBackend,
-                    backendSwitching = backendSwitching,
-                    backendSwitchError = backendSwitchError,
-                    onDownload = { vm.downloadModel() },
-                    onCancel = { vm.cancelModelDownload() },
-                    onDelete = { pendingModelDelete = true },
-                    onToggleEnabled = { vm.setLocalEnabled(it) },
-                    onSelectGpuBackend = { vm.setGpuBackend(it) },
-                )
+            // 总内存不足 8GiB 的机型不提供本地模型，整张卡片都不出现。
+            if (LocalModelRequirements.isSupported(context)) {
+                item(key = "local-model") {
+                    LocalModelCard(
+                        state = modelState,
+                        hasPartial = hasPartialModel,
+                        enabled = localEnabled,
+                        gpuBackend = gpuBackend,
+                        backendSwitching = backendSwitching,
+                        backendSwitchError = backendSwitchError,
+                        onDownload = { vm.downloadModel() },
+                        onCancel = { vm.cancelModelDownload() },
+                        onDelete = { pendingModelDelete = true },
+                        onToggleEnabled = { vm.setLocalEnabled(it) },
+                        onSelectGpuBackend = { vm.setGpuBackend(it) },
+                    )
+                }
             }
 
             if (providers.isEmpty()) {
