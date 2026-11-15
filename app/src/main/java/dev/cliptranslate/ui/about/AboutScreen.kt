@@ -176,8 +176,9 @@ fun AboutScreen(onBack: () -> Unit) {
 }
 
 /**
- * 按住图标满 [DEV_MODE_HOLD_MS] 且还没解锁过 → 解锁开发者模式并 Toast 提示。
+ * 关于页的隐藏开关：长按图标满 [DEV_MODE_HOLD_MS] 切换开发者模式。
  *
+ * 未解锁 → 解锁并提示；已解锁 → 关闭并提示（调试日志设置保留，只是藏起入口）。
  * 从按下开始一直等到所有手指抬起；中途滑动也算按住（不按移动阈值取消，简单优先）。
  * 抬手早于 3 秒什么也不做。
  */
@@ -192,8 +193,12 @@ private suspend fun PointerInputScope.detectDevModeHold(context: Context) {
             }
         }
         val heldMs = SystemClock.uptimeMillis() - pressedAt
-        // 已解锁过就不再重复提示；这里直接读单例的最新值，避免闭包拿到旧状态。
-        if (heldMs >= DEV_MODE_HOLD_MS && !DevSettings.devModeEnabled.value) {
+        if (heldMs < DEV_MODE_HOLD_MS) return@awaitEachGesture
+        // 直接读单例最新值，避免闭包拿到旧状态。
+        if (DevSettings.devModeEnabled.value) {
+            DevSettings.setDevModeEnabled(context, false)
+            Toast.makeText(context, "已关闭开发者模式", Toast.LENGTH_SHORT).show()
+        } else {
             DevSettings.setDevModeEnabled(context, true)
             Toast.makeText(context, "已开启开发者模式", Toast.LENGTH_SHORT).show()
         }
