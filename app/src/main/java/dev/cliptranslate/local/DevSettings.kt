@@ -21,12 +21,21 @@ object DevSettings {
     private const val PREFS_NAME = "app_prefs"
     private const val KEY_LOGGING_ENABLED = "debug_logging_enabled"
     private const val KEY_DEV_MODE = "dev_mode_enabled"
+    private const val KEY_MEMORY_THRESHOLD_GB = "memory_check_threshold_gb"
+
+    /** 本地模型加载前「可用内存预检」的默认值与可调范围（GB），见 [LocalTranslator]。 */
+    const val DEFAULT_MEMORY_THRESHOLD_GB = 4.0f
+    const val MIN_MEMORY_THRESHOLD_GB = 2.5f
+    const val MAX_MEMORY_THRESHOLD_GB = 4.5f
 
     private val _loggingEnabled = MutableStateFlow(BuildConfig.DEBUG)
     val loggingEnabled: StateFlow<Boolean> = _loggingEnabled.asStateFlow()
 
     private val _devModeEnabled = MutableStateFlow(false)
     val devModeEnabled: StateFlow<Boolean> = _devModeEnabled.asStateFlow()
+
+    private val _memoryThresholdGb = MutableStateFlow(DEFAULT_MEMORY_THRESHOLD_GB)
+    val memoryThresholdGb: StateFlow<Float> = _memoryThresholdGb.asStateFlow()
 
     @Volatile private var prefs: SharedPreferences? = null
 
@@ -39,6 +48,8 @@ object DevSettings {
         prefs = loaded
         _loggingEnabled.value = loaded.getBoolean(KEY_LOGGING_ENABLED, BuildConfig.DEBUG)
         _devModeEnabled.value = loaded.getBoolean(KEY_DEV_MODE, false)
+        _memoryThresholdGb.value = loaded.getFloat(KEY_MEMORY_THRESHOLD_GB, DEFAULT_MEMORY_THRESHOLD_GB)
+            .coerceIn(MIN_MEMORY_THRESHOLD_GB, MAX_MEMORY_THRESHOLD_GB)
     }
 
     fun setLoggingEnabled(context: Context, value: Boolean) {
@@ -51,5 +62,13 @@ object DevSettings {
         attach(context)
         _devModeEnabled.value = value
         prefs?.edit()?.putBoolean(KEY_DEV_MODE, value)?.apply()
+    }
+
+    /** 设置内存预检阈值（GB），越界会被夹到 [MIN_MEMORY_THRESHOLD_GB]..[MAX_MEMORY_THRESHOLD_GB]。 */
+    fun setMemoryThresholdGb(context: Context, value: Float) {
+        attach(context)
+        val clamped = value.coerceIn(MIN_MEMORY_THRESHOLD_GB, MAX_MEMORY_THRESHOLD_GB)
+        _memoryThresholdGb.value = clamped
+        prefs?.edit()?.putFloat(KEY_MEMORY_THRESHOLD_GB, clamped)?.apply()
     }
 }

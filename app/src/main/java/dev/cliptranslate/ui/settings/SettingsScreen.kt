@@ -72,9 +72,10 @@ fun SettingsScreen(
     val backendSwitching by vm.backendSwitching.collectAsStateWithLifecycle()
     val backendSwitchError by vm.backendSwitchError.collectAsStateWithLifecycle()
 
-    // 开发者模式 / 调试日志是 object 级单例（与 LocalSettings 同款），不需要再包一层 ViewModel。
+    // 开发者模式 / 调试日志 / 内存预检阈值是 object 级单例（与 LocalSettings 同款），不需要再包一层 ViewModel。
     val devModeEnabled by DevSettings.devModeEnabled.collectAsStateWithLifecycle()
     val loggingEnabled by DevSettings.loggingEnabled.collectAsStateWithLifecycle()
+    val memoryThresholdGb by DevSettings.memoryThresholdGb.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var pendingDelete by remember { mutableStateOf<Provider?>(null) }
@@ -171,6 +172,10 @@ fun SettingsScreen(
                         onToggleLogging = { enabled ->
                             DevSettings.setLoggingEnabled(context, enabled)
                             LlamaBridge.applyLogEnabled(enabled)
+                        },
+                        memoryThresholdGb = memoryThresholdGb,
+                        onMemoryThresholdChange = { gb ->
+                            DevSettings.setMemoryThresholdGb(context, gb)
                         },
                     )
                 }
@@ -534,13 +539,15 @@ private fun providerSummary(provider: Provider): String {
 }
 
 /**
- * 「开发者选项」卡片。目前只有调试日志一项：切换后立即生效（同步给 native），
- * 同时写进 app_prefs，重启后保持。
+ * 「开发者选项」卡片：调试日志开关（切换后立即生效并持久化）与
+ * 内存预检阈值（本地模型加载前的最低可用内存要求，默认 4GB）。
  */
 @Composable
 private fun DeveloperOptionsCard(
     loggingEnabled: Boolean,
     onToggleLogging: (Boolean) -> Unit,
+    memoryThresholdGb: Float,
+    onMemoryThresholdChange: (Float) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -561,9 +568,27 @@ private fun DeveloperOptionsCard(
                 onCheckedChange = onToggleLogging,
                 insideMargin = PaddingValues(0.dp),
             )
+            SuperDropdown(
+                items = MEMORY_THRESHOLD_OPTIONS.map { formatThresholdOption(it) },
+                selectedIndex = MEMORY_THRESHOLD_OPTIONS.indexOf(memoryThresholdGb),
+                title = "内存预检阈值",
+                summary = "本地模型加载前要求的最小可用内存",
+                insideMargin = PaddingValues(horizontal = 0.dp, vertical = 6.dp),
+                showValue = false,
+                onSelectedIndexChange = { index ->
+                    MEMORY_THRESHOLD_OPTIONS.getOrNull(index)?.let(onMemoryThresholdChange)
+                },
+            )
         }
     }
 }
+
+/** 内存预检阈值的可选档位（GB），与 [DevSettings] 的上下限一致。 */
+private val MEMORY_THRESHOLD_OPTIONS = listOf(2.5f, 3.0f, 3.5f, 4.0f, 4.5f)
+
+/** 4.0f → "4 GB"；2.5f → "2.5 GB"。 */
+private fun formatThresholdOption(gb: Float): String =
+    String.format(Locale.US, "%.1f", gb).trimEnd('0').trimEnd('.') + " GB"
 
 /** 设置页最底部的「关于模译」入口：versionName、开源组件与许可证都在关于页。 */
 @Composable

@@ -168,6 +168,7 @@ class LocalTranslator private constructor(context: Context) {
     /**
      * 4B Q4_K_M 常驻约 3GB，加载前先看可用内存，不够就给可读提示而不是被系统杀掉。
      *
+     * 阈值默认 4GB，开发者模式下可在 2.5~4.5GB 之间调整（[DevSettings.memoryThresholdGb]）。
      * 刚卸载旧后端会话时，释放的页要过一两秒才被内核回收计进 availMem，第一次读数会
      * 假性偏低（16GB 机型实测：卸载 NPU 后立即读 4.2GB、约 1 秒后恢复到 4.5GB+），
      * 所以按 1 秒间隔重试取最高值，全部不达标才报错。
@@ -175,25 +176,28 @@ class LocalTranslator private constructor(context: Context) {
     private fun checkAvailableMemory() {
         val manager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             ?: return
+        DevSettings.attach(appContext)
+        val thresholdGb = DevSettings.memoryThresholdGb.value.coerceIn(
+            DevSettings.MIN_MEMORY_THRESHOLD_GB,
+            DevSettings.MAX_MEMORY_THRESHOLD_GB,
+        )
+        val thresholdBytes = (thresholdGb * 1024f * 1024f * 1024f).toLong()
         val info = ActivityManager.MemoryInfo()
         var best = 0L
         repeat(MEMORY_CHECK_RETRIES) {
             manager.getMemoryInfo(info)
             best = maxOf(best, info.availMem)
-            if (best >= MIN_AVAILABLE_MEMORY_BYTES) return
+            if (best >= thresholdBytes) return
             Thread.sleep(MEMORY_CHECK_INTERVAL_MS)
         }
         throw LocalTranslateException(
-            "可用内存不足（需要约 4GB，当前 ${formatGigabytes(best)} GB）",
+            "可用内存不足（需要约 ${formatThreshold(thresholdGb)} GB，当前 ${formatGigabytes(best)} GB）",
         )
     }
 
     companion object {
         private const val CONTEXT_SIZE = 4096
         private const val MAX_TOKENS = 1024
-
-        /** 4GB = 4 * 1024 * 1024 * 1024，写成字面量才能是编译期常量。 */
-        private const val MIN_AVAILABLE_MEMORY_BYTES = 4_294_967_296L
 
         /** 内存预检重试次数与间隔，见 [checkAvailableMemory]。 */
         private const val MEMORY_CHECK_RETRIES = 5
@@ -217,6 +221,10 @@ class LocalTranslator private constructor(context: Context) {
 
     private fun formatGigabytes(bytes: Long): String =
         String.format(Locale.US, "%.1f", bytes / 1024.0 / 1024.0 / 1024.0)
+
+    /** 4.0f → "4"；2.5f → "2.5"，错误信息里不带无意义的小数尾巴。 */
+    private fun formatThreshold(gb: Float): String =
+        String.format(Locale.US, "%.1f", gb).trimEnd('0').trimEnd('.')
 }
 
 // --- 语言与提示词（纯函数，方便单独验证） -----------------------------------
