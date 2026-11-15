@@ -9,6 +9,10 @@ package dev.cliptranslate.local
 object LlamaBridge {
     @Volatile private var loaded = false
 
+    /** 调试日志开关的当前值；由 [applyLogEnabled] 维护，[ensureLoaded] 加载成功后补同步给 native。 */
+    @Volatile var logEnabled: Boolean = true
+        private set
+
     /** 最近一次 loadLibrary 失败的原因（dlopen 报错原文），用于界面诊断展示。 */
     @Volatile var lastLoadError: String? = null
         private set
@@ -21,10 +25,24 @@ object LlamaBridge {
         return try {
             System.loadLibrary("cliptranslate_jni")
             loaded = true
+            // 库加载前调不了 native 方法，这里把启动时/界面里设过的开关补上。
+            nativeSetLogEnabled(logEnabled)
             true
         } catch (t: Throwable) {
             lastLoadError = t.message
             false
+        }
+    }
+
+    /**
+     * 应用调试日志开关：字段总是立即更新；native 库还没加载时只记下值，
+     * 等 [ensureLoaded] 成功后再补一次 native 调用（native 侧默认 fail-open）。
+     */
+    @Synchronized
+    fun applyLogEnabled(enabled: Boolean) {
+        logEnabled = enabled
+        if (loaded) {
+            nativeSetLogEnabled(enabled)
         }
     }
 
@@ -60,4 +78,7 @@ object LlamaBridge {
     external fun nativeLoad(modelPath: String, nThreads: Int, nCtx: Int, gpuBackend: Int, skelDir: String): Long
     external fun nativeGenerate(handle: Long, prompt: String, maxTokens: Int): String
     external fun nativeUnload(handle: Long)
+
+    /** 调试日志总开关（关闭时 native 侧只保留 ERROR）。走 [applyLogEnabled]，不要直接调。 */
+    external fun nativeSetLogEnabled(enabled: Boolean)
 }

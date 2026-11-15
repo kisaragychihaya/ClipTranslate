@@ -79,6 +79,9 @@ android {
 
     buildFeatures {
         compose = true
+        // 关于页的版本号（BuildConfig.VERSION_NAME）和调试日志的构建类型默认值
+        // （BuildConfig.DEBUG）都来自生成类；AGP 8 起默认不生成，这里显式打开。
+        buildConfig = true
     }
 
     // llama.cpp 用 CMake FetchContent 拉源码，构建脚本在 src/main/cpp。

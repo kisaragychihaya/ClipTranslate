@@ -7,6 +7,8 @@
 #   1. syntax-level errors (Expecting / Unexpected / Unclosed / Syntax ...)
 #   2. any error diagnostic whose source line mentions our own package prefix
 #      `dev.cliptranslate.` (that means a reference between our modules is broken).
+#      Generated classes that only AGP/AAPT can produce (dev.cliptranslate.R and
+#      dev.cliptranslate.BuildConfig) are whitelisted -- they are expected noise here.
 #      kotlinc 2.1.x prints only the simple name -- `error: unresolved reference
 #      'AppNav'.` -- never the fully qualified one, so the package prefix is looked
 #      up in the source line echoed right after the diagnostic
@@ -65,11 +67,12 @@ KOTLINC_EXIT=$?
 
 ALL_ERRORS="$(grep -E 'error: ' "$RAW_LOG" || true)"
 SYNTAX_ERRORS="$(printf '%s\n' "$ALL_ERRORS" | grep -E 'error: (Expecting|Unexpected|Unclosed|unclosed|Syntax)' || true)"
-# The generated R class (dev.cliptranslate.R) is produced by AAPT at build time,
-# so any reference to it is unresolved in this SDK-less parse -- whitelist it.
+# The generated R class (dev.cliptranslate.R) and BuildConfig (dev.cliptranslate.BuildConfig)
+# are produced by AAPT/AGP at build time, so any reference to them is unresolved in this
+# SDK-less parse -- whitelist them.
 # kotlinc 2.1.x prints only simple names in diagnostics ('unresolved reference
 # 'R''), so the decision must use the source-echo line that follows the diagnostic.
-OWN_ERRORS="$(awk -v pat='dev[.]cliptranslate[.]' -v rpat='dev[.]cliptranslate[.]R([.[:space:]]|$)' '
+OWN_ERRORS="$(awk -v pat='dev[.]cliptranslate[.]' -v rpat='dev[.]cliptranslate[.](R|BuildConfig)([.[:space:]]|$)' '
     function keep() { return (diag ~ pat || echo ~ pat) && diag !~ rpat && echo !~ rpat }
     BEGIN { diag = ""; echo = "" }
     /: error: / {

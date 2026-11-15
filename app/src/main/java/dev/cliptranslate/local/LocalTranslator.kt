@@ -165,25 +165,39 @@ class LocalTranslator private constructor(context: Context) {
         else -> "本地模型加载失败（内存不足或模型文件损坏）"
     }
 
-    /** 4B Q4_K_M 常驻约 3GB，加载前先看可用内存，不够就给可读提示而不是被系统杀掉。 */
+    /**
+     * 4B Q4_K_M 常驻约 3GB，加载前先看可用内存，不够就给可读提示而不是被系统杀掉。
+     *
+     * 刚卸载旧后端会话时，释放的页要过一两秒才被内核回收计进 availMem，第一次读数会
+     * 假性偏低（16GB 机型实测：卸载 NPU 后立即读 4.2GB、约 1 秒后恢复到 4.5GB+），
+     * 所以按 1 秒间隔重试取最高值，全部不达标才报错。
+     */
     private fun checkAvailableMemory() {
         val manager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             ?: return
         val info = ActivityManager.MemoryInfo()
-        manager.getMemoryInfo(info)
-        if (info.availMem < MIN_AVAILABLE_MEMORY_BYTES) {
-            throw LocalTranslateException(
-                "可用内存不足（需要约 4.5GB，当前 ${formatGigabytes(info.availMem)} GB）",
-            )
+        var best = 0L
+        repeat(MEMORY_CHECK_RETRIES) {
+            manager.getMemoryInfo(info)
+            best = maxOf(best, info.availMem)
+            if (best >= MIN_AVAILABLE_MEMORY_BYTES) return
+            Thread.sleep(MEMORY_CHECK_INTERVAL_MS)
         }
+        throw LocalTranslateException(
+            "可用内存不足（需要约 4GB，当前 ${formatGigabytes(best)} GB）",
+        )
     }
 
     companion object {
         private const val CONTEXT_SIZE = 4096
         private const val MAX_TOKENS = 1024
 
-        /** 4.5GB = 4.5 * 1024 * 1024 * 1024，写成字面量才能是编译期常量。 */
-        private const val MIN_AVAILABLE_MEMORY_BYTES = 4_831_838_208L
+        /** 4GB = 4 * 1024 * 1024 * 1024，写成字面量才能是编译期常量。 */
+        private const val MIN_AVAILABLE_MEMORY_BYTES = 4_294_967_296L
+
+        /** 内存预检重试次数与间隔，见 [checkAvailableMemory]。 */
+        private const val MEMORY_CHECK_RETRIES = 5
+        private const val MEMORY_CHECK_INTERVAL_MS = 1_000L
 
         private const val ERR_TOO_LONG = "ERR_TOO_LONG"
 

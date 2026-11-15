@@ -36,6 +36,7 @@
 #include <android/log.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -51,6 +52,13 @@
 
 #include "ggml-backend.h"
 #include "llama.h"
+
+/**
+ * 调试日志总开关。默认 true 是 fail-open：构建类型的默认值（debug 开 / release 关）
+ * 由 Kotlin 在 Application 启动时经 nativeSetLogEnabled 注入，这里只保证在 Kotlin
+ * 调用之前不会把日志吞掉。关闭时只保留 ERROR，见 llama_log_to_logcat 与 LOGI/LOGW。
+ */
+static std::atomic<bool> g_log_enabled{true};
 
 namespace {
 
@@ -89,8 +97,15 @@ struct Session {
 std::mutex g_mutex;
 std::unordered_set<Session *> g_sessions;
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, kLogTag, __VA_ARGS__)
+// INFO/WARN 受调试日志开关控制；ERROR 无条件输出，保证关闭日志后仍能看到真故障。
+#define LOGI(...) \
+    do { \
+        if (g_log_enabled) __android_log_print(ANDROID_LOG_INFO, kLogTag, __VA_ARGS__); \
+    } while (0)
+#define LOGW(...) \
+    do { \
+        if (g_log_enabled) __android_log_print(ANDROID_LOG_WARN, kLogTag, __VA_ARGS__); \
+    } while (0)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, kLogTag, __VA_ARGS__)
 
 void throw_runtime(JNIEnv * env, const std::string & message) {
@@ -278,6 +293,12 @@ Session * lookup_session(jlong handle) {
 
 /** llama.cpp 的日志默认写 stderr，Android 上会丢；接到 logcat 才能在真机上看问题。 */
 void llama_log_to_logcat(enum ggml_log_level level, const char * text, void * /* user_data */) {
+    // 关闭时只放行 ERROR；GGML_LOG_LEVEL_CONT 是 ERROR 多行日志的续行，一并保留，
+    // 否则 ERROR 会被拆成半行。b12375 的枚举是 DEBUG=1<INFO=2<WARN=3<ERROR=4<CONT=5，
+    // 「大于 ERROR」只会滤掉 CONT，不能用来当严重度判断。
+    if (!g_log_enabled && level != GGML_LOG_LEVEL_ERROR && level != GGML_LOG_LEVEL_CONT) {
+        return;
+    }
     if (text == nullptr) {
         return;
     }
@@ -770,6 +791,13 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeUnload(JNIEnv * /* env */, jobjec
         // 析构路径上不该再抛；真抛了也只是漏一点内存，不能让 JVM 看到 std::terminate。
         LOGE("nativeUnload: exception while freeing session");
     }
+}
+
+// 调试日志开关：只写一个 atomic 标志，随时可调（模块加载前 Kotlin 不会调到这里）。
+JNIEXPORT void JNICALL
+Java_dev_cliptranslate_local_LlamaBridge_nativeSetLogEnabled(
+        JNIEnv * /* env */, jobject /* thiz */, jboolean enabled) {
+    g_log_enabled.store(enabled == JNI_TRUE, std::memory_order_relaxed);
 }
 
 }  // extern "C"

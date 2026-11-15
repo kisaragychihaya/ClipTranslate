@@ -18,13 +18,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cliptranslate.R
 import dev.cliptranslate.data.Provider
+import dev.cliptranslate.local.DevSettings
 import dev.cliptranslate.local.GpuBackend
+import dev.cliptranslate.local.LlamaBridge
 import dev.cliptranslate.local.ModelManager
 import dev.cliptranslate.local.ModelState
 import java.util.Locale
@@ -44,6 +47,7 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.extra.SuperArrow
 import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.extra.SuperDropdown
 import top.yukonga.miuix.kmp.extra.SuperSwitch
@@ -53,6 +57,7 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
+    onOpenAbout: () -> Unit,
     vm: SettingsViewModel = viewModel(),
 ) {
     val providers by vm.providers.collectAsStateWithLifecycle()
@@ -66,6 +71,11 @@ fun SettingsScreen(
     val gpuBackend by vm.gpuBackend.collectAsStateWithLifecycle()
     val backendSwitching by vm.backendSwitching.collectAsStateWithLifecycle()
     val backendSwitchError by vm.backendSwitchError.collectAsStateWithLifecycle()
+
+    // 开发者模式 / 调试日志是 object 级单例（与 LocalSettings 同款），不需要再包一层 ViewModel。
+    val devModeEnabled by DevSettings.devModeEnabled.collectAsStateWithLifecycle()
+    val loggingEnabled by DevSettings.loggingEnabled.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     var pendingDelete by remember { mutableStateOf<Provider?>(null) }
     var pendingModelDelete by remember { mutableStateOf(false) }
@@ -151,6 +161,23 @@ fun SettingsScreen(
                         onRequestDelete = { pendingDelete = provider },
                     )
                 }
+            }
+
+            // 解锁开发者模式后才出现；日志开关立即作用于 native 层并持久化。
+            if (devModeEnabled) {
+                item(key = "developer-options") {
+                    DeveloperOptionsCard(
+                        loggingEnabled = loggingEnabled,
+                        onToggleLogging = { enabled ->
+                            DevSettings.setLoggingEnabled(context, enabled)
+                            LlamaBridge.applyLogEnabled(enabled)
+                        },
+                    )
+                }
+            }
+
+            item(key = "about") {
+                AboutEntry(onClick = onOpenAbout)
             }
         }
 
@@ -504,6 +531,54 @@ private fun providerSummary(provider: Provider): String {
         parts.add("默认 $defaultModel")
     }
     return parts.joinToString(" · ")
+}
+
+/**
+ * 「开发者选项」卡片。目前只有调试日志一项：切换后立即生效（同步给 native），
+ * 同时写进 app_prefs，重启后保持。
+ */
+@Composable
+private fun DeveloperOptionsCard(
+    loggingEnabled: Boolean,
+    onToggleLogging: (Boolean) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "开发者选项",
+                style = MiuixTheme.textStyles.title4,
+            )
+            HorizontalDivider()
+            SuperSwitch(
+                title = "调试日志",
+                summary = "输出推理等调试日志，重启后保持",
+                checked = loggingEnabled,
+                onCheckedChange = onToggleLogging,
+                insideMargin = PaddingValues(0.dp),
+            )
+        }
+    }
+}
+
+/** 设置页最底部的「关于模译」入口：versionName、开源组件与许可证都在关于页。 */
+@Composable
+private fun AboutEntry(onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        insideMargin = PaddingValues(0.dp),
+    ) {
+        SuperArrow(
+            title = "关于模译",
+            summary = "版本号、开源组件与许可信息",
+            insideMargin = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            onClick = onClick,
+        )
+    }
 }
 
 private const val MEBIBYTE = 1024L * 1024L

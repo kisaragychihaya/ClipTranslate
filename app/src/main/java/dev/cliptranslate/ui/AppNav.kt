@@ -12,12 +12,14 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.navigationevent.compose.rememberNavigationEventDispatcherOwner
+import dev.cliptranslate.ui.about.AboutScreen
 import dev.cliptranslate.ui.settings.SettingsScreen
 import dev.cliptranslate.ui.settings.SettingsViewModel
 import dev.cliptranslate.ui.translate.TranslateScreen
 
 const val ROUTE_TRANSLATE = "translate"
 const val ROUTE_SETTINGS = "settings"
+const val ROUTE_ABOUT = "about"
 
 /**
  * 返回主界面：优先正常出栈；出不动（进程被杀后导航栈被 savedState 恢复成只剩
@@ -62,8 +64,12 @@ fun AppNav() {
             composable(ROUTE_SETTINGS) {
                 SettingsScreen(
                     onBack = { navController.backToTranslate() },
+                    onOpenAbout = { navController.navigate(ROUTE_ABOUT) },
                     vm = viewModel<SettingsViewModel>(),
                 )
+            }
+            composable(ROUTE_ABOUT) {
+                AboutScreen(onBack = { navController.backToTranslate() })
             }
         }
     }
