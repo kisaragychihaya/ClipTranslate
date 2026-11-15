@@ -22,8 +22,8 @@ android {
         applicationId = "dev.cliptranslate"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         // 本地推理只做 arm64（llama.cpp CPU 版）；x86 模拟器跑不了这个 .so。
         ndk {
