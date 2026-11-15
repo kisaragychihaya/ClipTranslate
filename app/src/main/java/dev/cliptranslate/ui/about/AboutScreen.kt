@@ -69,6 +69,11 @@ private class OpenSourceComponent(
  * Google 的 Gemma 使用条款（以模型页说明为准）。
  */
 private val OPEN_SOURCE_COMPONENTS = listOf(
+    OpenSourceComponent(
+        name = "模译（ClipTranslate）",
+        license = "Apache-2.0",
+        url = "https://github.com/kisaragychihaya/ClipTranslate",
+    ),
     OpenSourceComponent("llama.cpp", "MIT", "https://github.com/ggml-org/llama.cpp"),
     OpenSourceComponent("Miuix", "Apache-2.0", "https://github.com/compose-miuix-ui/miuix"),
     OpenSourceComponent("Jetpack Compose / AndroidX", "Apache-2.0", "https://developer.android.com/jetpack"),

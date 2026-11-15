@@ -1,0 +1,17 @@
+模译（ClipTranslate）
+Copyright 2026 kisaragychihaya
+
+本仓库的源代码与文档以 Apache License, Version 2.0 发布（见 LICENSE 文件）。
+上述授权不适用于下列第三方材料，它们按各自条款随应用分发或获取，使用时须遵守
+对应条款：
+
+- Qualcomm Hexagon（QNN/QAIRT）运行时与 skel 库（third_party/htp-skel/、
+  third_party/hexagon-sdk-lite/、app/src/main/assets/htp-skel/）：
+  Qualcomm Technologies, Inc. 专有软件，仅以二进制形式作为本应用的一部分随
+  APK 再分发，仅限 Qualcomm 芯片组平台使用，受高通软件许可协议约束，相关权利
+  均由 Qualcomm 保留。移除这些文件即得到完全开源（Apache-2.0）的代码树。
+- TranslateGemma-4B（GGUF）模型：由用户通过应用自行从 ModelScope 下载，
+  不受本仓库许可证授予范围覆盖，使用须遵守 Google Gemma Terms of Use
+  （见应用内「关于」页的源项目链接）。
+- llama.cpp（通过 CMake FetchContent 获取）：MIT License，
+  Copyright 2023-2026 The ggml authors。
