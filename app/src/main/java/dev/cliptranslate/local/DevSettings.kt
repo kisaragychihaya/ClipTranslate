@@ -71,4 +71,13 @@ object DevSettings {
         _memoryThresholdGb.value = clamped
         prefs?.edit()?.putFloat(KEY_MEMORY_THRESHOLD_GB, clamped)?.apply()
     }
+
+    /**
+     * 用户是否在开发者选项里手动设过阈值。
+     *
+     * 没设过时加载前的预检要用各模型自带的默认值（[dev.cliptranslate.local.LocalModelSpec.defaultMemoryThresholdGb]），
+     * 只有用户显式调过才一视同仁地按他的值来 —— 靠 prefs 里有没有这个 key 区分，
+     * 因为 [memoryThresholdGb] 读不到时会填默认 4GB，无法与「用户主动选了 4GB」区分。
+     */
+    fun hasCustomMemoryThreshold(): Boolean = prefs?.contains(KEY_MEMORY_THRESHOLD_GB) == true
 }

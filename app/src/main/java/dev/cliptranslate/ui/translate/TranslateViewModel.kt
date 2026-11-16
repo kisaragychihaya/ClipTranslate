@@ -10,6 +10,7 @@ import dev.cliptranslate.core.TextUtil
 import dev.cliptranslate.data.LOCAL_PROVIDER_ID
 import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
+import dev.cliptranslate.local.LocalModelCatalog
 import dev.cliptranslate.local.LocalModelRequirements
 import dev.cliptranslate.local.LocalSettings
 import dev.cliptranslate.local.LocalTranslateException
@@ -38,7 +39,7 @@ data class TranslateUiState(
     val providerId: String? = null,
     val modelId: String? = null,
     val providers: List<Provider> = emptyList(),
-    /** 本地模型文件是否已就绪（选中本地 Provider 但没下载时，主界面据此提示去设置下载）。 */
+    /** 当前选中的本地模型是否已就绪（选中本地 Provider 但没下载时，主界面据此提示去设置下载）。 */
     val localModelReady: Boolean = false,
 ) {
     val currentProvider: Provider?
@@ -62,20 +63,20 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         LocalSettings.attach(application)
-        _state.update {
-            it.copy(
+        _state.update { current ->
+            val next = current.copy(
                 targetCode = restoreTargetCode(),
                 providerId = prefs.getString(KEY_PROVIDER_ID, null),
                 modelId = prefs.getString(KEY_MODEL_ID, null),
-                localModelReady = modelManager.state.value is ModelState.Ready,
             )
+            next.copy(localModelReady = isLocalModelReady(next))
         }
         refreshProviders()
 
-        // 下载完成 / 被删除后，主界面的「本地模型未下载」提示要跟着变。
+        // 任一模型下载完成 / 被删除 / 换了所选模型后，主界面的「本地模型未下载」提示要跟着变。
         viewModelScope.launch {
-            modelManager.state.collect { modelState ->
-                _state.update { it.copy(localModelReady = modelState is ModelState.Ready) }
+            modelManager.statesMap.collect {
+                _state.update { current -> current.copy(localModelReady = isLocalModelReady(current)) }
             }
         }
         // 设置页切换「启用本地离线翻译」后，服务商列表要重新过滤（首次值由 refreshProviders 处理）。
@@ -104,11 +105,14 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         val model = provider.defaultModelId?.takeIf { it.isNotBlank() }
             ?: provider.models.firstOrNull()?.id
         _state.update { it.copy(providerId = provider.id, modelId = model, output = "", error = null) }
+        refreshLocalReadiness()
         persistSelection()
     }
 
     fun selectModel(modelId: String) {
         _state.update { it.copy(modelId = modelId, output = "", error = null) }
+        // 换模型可能从「已下载」切到「还没下载」，提示要立刻跟着变（statesMap 不会因此推送）。
+        refreshLocalReadiness()
         persistSelection()
     }
 
@@ -163,9 +167,9 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
                     providers = providers,
                     providerId = provider?.id,
                     modelId = model,
-                    localModelReady = modelManager.state.value is ModelState.Ready,
                 )
             }
+            _state.update { it.copy(localModelReady = isLocalModelReady(it)) }
             persistSelection()
         }
     }
@@ -189,13 +193,15 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         val targetCode = snapshot.targetCode
         val isLocal = provider.id == LOCAL_PROVIDER_ID
         val model = snapshot.effectiveModelId.orEmpty()
+        // 本地链路的「当前模型」= 服务商里选中的那个模型 id；为空/失效时退回目录默认。
+        val localSpec = LocalModelCatalog.byId(snapshot.effectiveModelId)
         if (isLocal) {
-            // 本地链路不依赖模型 id，但必须有下载好且校验通过的模型文件。
+            // 本地链路要有下载好且校验通过的模型文件 —— 只检查选中的那一个，别的模型下没下无关。
             if (!LocalModelRequirements.isSupported(app)) {
                 _state.update { it.copy(error = "本机内存不足，无法使用本地模型") }
                 return
             }
-            if (modelManager.state.value !is ModelState.Ready) {
+            if (modelManager.statesMap.value[localSpec.id] !is ModelState.Ready) {
                 _state.update { it.copy(error = "请先在设置中下载本地模型") }
                 return
             }
@@ -209,7 +215,7 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val result = withContext(Dispatchers.IO) {
                     if (isLocal) {
-                        LocalTranslator.get(app).translate(text, targetCode)
+                        LocalTranslator.get(app).translate(text, targetCode, localSpec.id)
                     } else {
                         OpenAiClient(provider.baseUrl, provider.apiKey).chat(
                             model,
@@ -242,6 +248,28 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             }
         }
+    }
+
+    // --- 本地模型就绪判断 ---------------------------------------------------
+
+    /**
+     * 本地模型是否就绪：只看「当前选中的那个模型」。
+     *
+     * 用户可能在设置里下过两个模型却只用一个，所以不能再用「有任意一个 Ready 就算就绪」。
+     * 选中模型是服务商的模型 id；没选/失效时按目录默认，与 [translate] 的兜底保持一致。
+     */
+    private fun isLocalModelReady(snapshot: TranslateUiState): Boolean {
+        val modelId = if (snapshot.currentProvider?.id == LOCAL_PROVIDER_ID) {
+            LocalModelCatalog.byId(snapshot.effectiveModelId).id
+        } else {
+            LocalModelCatalog.DEFAULT_MODEL_ID
+        }
+        return modelManager.statesMap.value[modelId] is ModelState.Ready
+    }
+
+    /** 选择（服务商/模型）变了就重算一次就绪标记 —— 这类变化不会让 statesMap 推送。 */
+    private fun refreshLocalReadiness() {
+        _state.update { it.copy(localModelReady = isLocalModelReady(it)) }
     }
 
     // --- 记忆项 -------------------------------------------------------------

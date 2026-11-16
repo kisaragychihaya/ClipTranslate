@@ -28,8 +28,9 @@ import dev.cliptranslate.data.Provider
 import dev.cliptranslate.local.DevSettings
 import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.LlamaBridge
+import dev.cliptranslate.local.LocalModelCatalog
 import dev.cliptranslate.local.LocalModelRequirements
-import dev.cliptranslate.local.ModelManager
+import dev.cliptranslate.local.LocalModelSpec
 import dev.cliptranslate.local.ModelState
 import java.util.Locale
 import top.yukonga.miuix.kmp.basic.Button
@@ -68,6 +69,11 @@ fun SettingsScreen(
     val fetchResult by vm.fetchResult.collectAsStateWithLifecycle()
     val modelState by vm.modelState.collectAsStateWithLifecycle()
     val hasPartialModel by vm.hasPartialModel.collectAsStateWithLifecycle()
+    val selectedLocalModelId by vm.selectedLocalModelId.collectAsStateWithLifecycle()
+    val localModels = vm.localModels
+    // 选中模型的大小/名称直接取目录：卡片进度行与删除确认弹窗共用同一份，不会各算一套。
+    val selectedLocalModel = localModels.firstOrNull { it.id == selectedLocalModelId }
+        ?: LocalModelCatalog.byId(selectedLocalModelId)
     val localEnabled by vm.localEnabled.collectAsStateWithLifecycle()
     val gpuBackend by vm.gpuBackend.collectAsStateWithLifecycle()
     val backendSwitching by vm.backendSwitching.collectAsStateWithLifecycle()
@@ -115,12 +121,15 @@ fun SettingsScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 96.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // 总内存不足 8GiB 的机型不提供本地模型，整张卡片都不出现。
+            // 总内存跑不动任何本地模型的机型不提供该功能，整张卡片都不出现。
             if (LocalModelRequirements.isSupported(context)) {
                 item(key = "local-model") {
                     LocalModelCard(
                         state = modelState,
                         hasPartial = hasPartialModel,
+                        spec = selectedLocalModel,
+                        models = localModels,
+                        onSelectModel = { vm.selectLocalModel(it) },
                         enabled = localEnabled,
                         gpuBackend = gpuBackend,
                         backendSwitching = backendSwitching,
@@ -228,7 +237,7 @@ fun SettingsScreen(
                 title = stringResource(R.string.local_model_delete_title),
                 summary = stringResource(
                     R.string.local_model_delete_message,
-                    formatBytes(ModelManager.MODEL_SIZE_BYTES),
+                    formatBytes(selectedLocalModel.sizeBytes),
                 ),
                 onDismissRequest = { pendingModelDelete = false },
             ) {
@@ -284,13 +293,17 @@ fun SettingsScreen(
 }
 
 /**
- * 「本地模型（离线翻译）」卡片：状态行 + 下载/取消/删除按钮 + 启用开关 + 加速方式（含切换进度与失败提示）。
- * 放在 Provider 列表上方，因为它是内置的、不需要任何配置。
+ * 「本地模型（离线翻译）」卡片：模型选择 + 状态行 + 下载/取消/删除按钮 + 启用开关 + 加速方式
+ * （含切换进度与失败提示）。放在 Provider 列表上方，因为它是内置的、不需要任何配置。
+ * 启用开关与加速方式是全局设置，对所有模型共享；只有文件相关操作跟着 [spec] 走。
  */
 @Composable
 private fun LocalModelCard(
     state: ModelState,
     hasPartial: Boolean,
+    spec: LocalModelSpec,
+    models: List<LocalModelSpec>,
+    onSelectModel: (String) -> Unit,
     enabled: Boolean,
     gpuBackend: GpuBackend,
     backendSwitching: Boolean,
@@ -317,10 +330,22 @@ private fun LocalModelCard(
                 style = MiuixTheme.textStyles.footnote2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             )
+            // 每个模型各自下载、各自占用磁盘，所以选择放在状态行上方：先选模型，再看它的状态。
+            SuperDropdown(
+                items = models.map { it.displayName },
+                selectedIndex = models.indexOfFirst { it.id == spec.id }.coerceAtLeast(0),
+                title = stringResource(R.string.local_model_choose),
+                summary = spec.displayName,
+                insideMargin = PaddingValues(horizontal = 0.dp, vertical = 6.dp),
+                showValue = false,
+                onSelectedIndexChange = { index ->
+                    models.getOrNull(index)?.id?.let(onSelectModel)
+                },
+            )
 
             HorizontalDivider()
 
-            LocalModelStatus(state = state)
+            LocalModelStatus(state = state, sizeBytes = spec.sizeBytes)
 
             // 校验中不提供按钮：算 SHA256 打断不了，给了按钮也是摆设。
             when (state) {
@@ -427,7 +452,7 @@ private fun gpuBackendLabel(backend: GpuBackend): String = stringResource(
 
 /** 状态行：未下载 / 下载中（进度条 + 百分比 + MB）/ 校验中 / 已就绪 · 2.32 GB / 错误信息。 */
 @Composable
-private fun LocalModelStatus(state: ModelState) {
+private fun LocalModelStatus(state: ModelState, sizeBytes: Long) {
     when (state) {
         is ModelState.NotDownloaded -> {
             Text(
@@ -438,7 +463,7 @@ private fun LocalModelStatus(state: ModelState) {
         }
 
         is ModelState.Downloading -> {
-            val total = if (state.totalBytes > 0) state.totalBytes else ModelManager.MODEL_SIZE_BYTES
+            val total = if (state.totalBytes > 0) state.totalBytes else sizeBytes
             val percent = ((state.downloadedBytes * 100) / total).toInt().coerceIn(0, 100)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -477,7 +502,7 @@ private fun LocalModelStatus(state: ModelState) {
             Text(
                 text = stringResource(
                     R.string.local_model_status_ready,
-                    formatBytes(ModelManager.MODEL_SIZE_BYTES),
+                    formatBytes(sizeBytes),
                 ),
                 style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.primary,
@@ -544,7 +569,8 @@ private fun providerSummary(provider: Provider): String {
 
 /**
  * 「开发者选项」卡片：调试日志开关（切换后立即生效并持久化）与
- * 内存预检阈值（本地模型加载前的最低可用内存要求，默认 4GB）。
+ * 内存预检阈值（本地模型加载前的最低可用内存要求；未手动设置时按所选模型的
+ * [dev.cliptranslate.local.LocalModelSpec.defaultMemoryThresholdGb] 取值，4B 与 2B 各不相同）。
  */
 @Composable
 private fun DeveloperOptionsCard(

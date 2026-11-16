@@ -26,7 +26,7 @@ cd "$PROJECT_ROOT" || { echo "FAIL: cannot cd into $PROJECT_ROOT"; exit 2; }
 # JAVA_HOME / KOTLINC_HOME from the caller win; otherwise fall back to the
 # portable installs on this machine.
 if ! command -v java >/dev/null 2>&1; then
-    for candidate in "${JAVA_HOME:-}" "$DEFAULT_JAVA_HOME"; do
+    for candidate in "${JAVA_HOME:-}" "$PROJECT_ROOT/env/jdk-21.0.13+9" "$DEFAULT_JAVA_HOME"; do
         [ -n "$candidate" ] || continue
         if [ -x "$candidate/bin/java" ]; then
             export JAVA_HOME="$candidate"
@@ -36,7 +36,13 @@ if ! command -v java >/dev/null 2>&1; then
     done
 fi
 
-KOTLINC_HOME="${KOTLINC_HOME:-$DEFAULT_KOTLINC_HOME}"
+if [ -z "${KOTLINC_HOME:-}" ]; then
+    if [ -x "$PROJECT_ROOT/env/kotlinc/bin/kotlinc" ]; then
+        KOTLINC_HOME="$PROJECT_ROOT/env/kotlinc"
+    else
+        KOTLINC_HOME="$DEFAULT_KOTLINC_HOME"
+    fi
+fi
 export PATH="$KOTLINC_HOME/bin:$PATH"
 
 if ! command -v kotlinc >/dev/null 2>&1; then

@@ -22,7 +22,7 @@ data class Provider(
 /** 内置「本地离线翻译」Provider 的固定 id。它不写进 SharedPreferences，由 [ProviderRepository] 每次注入到列表首位。 */
 const val LOCAL_PROVIDER_ID = "local-translategemma"
 
-/** 内置本地模型的 id，对应 ModelManager 下载的那个 GGUF。 */
+/** 默认本地模型 id，与 `LocalModelCatalog.DEFAULT_MODEL_ID` 同值；可用模型目录见 LocalModelCatalog。 */
 const val LOCAL_MODEL_ID = "translategemma-4b-it"
 
 /** 内置 Provider 不可编辑、不可删除；UI 据此隐藏编辑/删除入口。 */

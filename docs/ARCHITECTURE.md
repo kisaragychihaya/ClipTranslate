@@ -28,6 +28,15 @@ app/src/main/java/dev/cliptranslate/
 ├── data/                      # Android 依赖
 │   ├── Models.kt              # Provider / ModelInfo 数据类
 │   └── ProviderRepository.kt  # SharedPreferences CRUD
+├── local/                     # 本地 GGUF 推理（Android 依赖 + JNI）
+│   ├── LocalModelCatalog.kt   # 模型目录：id/地址/SHA256/大小/内存门槛/提示词风格
+│   ├── ModelManager.kt        # 按模型 id 的下载、断点续传、SHA256 校验、删除
+│   ├── LocalModelRequirements.kt # 机型门槛：总内存够哪些模型
+│   ├── LocalTranslator.kt     # llama.cpp 推理：提示词展开、换模型/换后端重载、加载前内存预检
+│   ├── LlamaBridge.kt         # JNI 声明与 native 库加载（只做裸补全）
+│   ├── GpuBackend.kt          # 加速方式枚举（对应 nativeLoad 的整型参数）
+│   ├── LocalSettings.kt       # 启用开关与加速方式（SharedPreferences）
+│   └── DevSettings.kt         # 开发者模式、调试日志、内存预检阈值
 ├── net/                       # Android 依赖（org.json 为系统库）
 │   ├── OpenAiClient.kt        # chat / fetchModels（阻塞式，IO 线程调用）
 │   ├── OpenAiException.kt
@@ -37,6 +46,7 @@ app/src/main/java/dev/cliptranslate/
 └── ui/
     ├── AppNav.kt
     ├── theme/Theme.kt
+    ├── about/AboutScreen.kt   # 版本、开源组件与许可证；长按 logo 解锁开发者模式
     ├── translate/TranslateScreen.kt + TranslateViewModel.kt
     └── settings/SettingsScreen.kt + SettingsViewModel.kt
         + ProviderEditorSheet.kt + ModelPickerSheet.kt
@@ -77,6 +87,46 @@ class ProviderRepository(context: Context) {
 }
 ```
 
+### local（package `dev.cliptranslate.local`）
+```kotlin
+enum class LocalModelPromptStyle { GEMMA, INDEX_TRANSLATE }
+
+data class LocalModelSpec(
+    val id: String, val displayName: String, val fileName: String,
+    val downloadUrl: String, val sha256: String, val sizeBytes: Long,
+    val minTotalMemBytes: Long,             // 机型门槛：设备总内存
+    val defaultMemoryThresholdGb: Float,    // 加载前可用内存预检的默认阈值
+    val promptStyle: LocalModelPromptStyle,
+)
+
+object LocalModelCatalog {
+    val models: List<LocalModelSpec>        // 顺序即优先级，第一个是默认模型
+    fun byId(id: String?): LocalModelSpec   // 找不到/为空回退第一个，永不抛
+}
+
+class ModelManager {
+    val statesMap: StateFlow<Map<String, ModelState>>
+    fun stateOf(modelId: String): StateFlow<ModelState>
+    fun hasPartialOf(modelId: String): StateFlow<Boolean>
+    fun modelFile(modelId: String): File
+    fun download(modelId: String) / cancelDownload(modelId: String) / deleteModel(modelId: String)
+    fun refreshFromDisk()
+}
+
+object LocalModelRequirements {
+    fun isSupported(context: Context): Boolean                   // 任一模型可用
+    fun isSupported(context: Context, spec: LocalModelSpec): Boolean
+    fun supportedModels(context: Context): List<LocalModelSpec>
+}
+
+class LocalTranslator {
+    suspend fun translate(text: String, targetCode: String, modelId: String): String
+}
+```
+- 加模型只改 `LocalModelCatalog`：下载、校验、机型过滤、设置页下拉、提示词分派全按目录走，不再有散落的硬编码常量。
+- native 侧只做裸 prompt 补全，chat template 由 Kotlin 侧展开（`GEMMA` / `INDEX_TRANSLATE` 两套，必须逐字一致）。
+- 内存判定分两层：`minTotalMemBytes` 决定机型能否列出该模型，`defaultMemoryThresholdGb` 决定加载前的可用内存预检阈值（用户自定义过阈值时以用户值为准）。
+
 ### net（package `dev.cliptranslate.net`）
 ```kotlin
 class OpenAiException(message: String, val httpCode: Int? = null) : Exception(message)
@@ -107,6 +157,7 @@ object ClipboardHelper {
 - 记忆项（`SharedPreferences` 单独文件 `app_prefs`）：最近使用的 providerId、modelId、targetCode。
 - 无已配置 Provider 时翻译页显示"去设置添加"引导按钮。
 - **设置页**：Provider 列表（名称、baseUrl、模型数）；「+」新建 / 点击编辑（底部弹窗编辑 name/baseUrl/apiKey）;「拉取模型」按钮 → `fetchModels()` → 弹出模型多选列表 → 确认后一键合并保存到该 Provider。
+- **本地模型**：设置页卡片顶部可选模型（只列本机内存跑得动的），每个模型独立下载/删除、各自 `.part` 可断点续传；「启用本地离线翻译」开关与「加速方式」是全局设置。翻译页的「本地模型未就绪」提示只看当前选中的那个模型。
 - 线程纪律：所有 `OpenAiClient` 调用在 `Dispatchers.IO`；StateFlow 暴露状态。
 
 ## 4. CI（GitHub Actions）

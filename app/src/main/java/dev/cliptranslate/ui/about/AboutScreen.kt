@@ -66,7 +66,7 @@ private class OpenSourceComponent(
  * 组件清单的许可证名与链接都在 2026-11 逐一核对过：
  * llama.cpp 仓库根 LICENSE 是 MIT；miuix、AndroidX、Kotlin、kotlinx.coroutines 均为 Apache-2.0；
  * TranslateGemma-4B 的 ModelScope 模型页 License 字段为 `gemma`，模型卡徽标指向
- * Google 的 Gemma 使用条款（以模型页说明为准）。
+ * Google 的 Gemma 使用条款（以模型页说明为准）；Index-Translate-2B 的模型页标注为 Apache-2.0。
  */
 private val OPEN_SOURCE_COMPONENTS = listOf(
     OpenSourceComponent(
@@ -83,6 +83,11 @@ private val OPEN_SOURCE_COMPONENTS = listOf(
         name = "TranslateGemma-4B（GGUF）",
         license = "Gemma Terms of Use",
         url = "https://www.modelscope.cn/models/42ailab/TranslateGemma-4B-GGUF",
+    ),
+    OpenSourceComponent(
+        name = "Index-Translate-2B（GGUF）",
+        license = "Apache-2.0",
+        url = "https://www.modelscope.cn/models/IndexTeam/Index-Translate-2B-GGUF",
     ),
 )
 
@@ -143,7 +148,8 @@ fun AboutScreen(onBack: () -> Unit) {
                 )
                 Text(
                     text = "剪贴板或输入框里的文本一键翻译。支持 OpenAI 兼容在线接口，" +
-                        "也能用本地离线的 TranslateGemma 模型（llama.cpp 推理，可选高通 NPU / GPU 加速）。",
+                        "也能用本地 GGUF 模型离线翻译（llama.cpp 推理，可选高通 NPU / GPU 加速）：" +
+                        "TranslateGemma 4B 质量更好，Index-Translate 2B 更省内存。",
                     style = MiuixTheme.textStyles.body2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     textAlign = TextAlign.Center,

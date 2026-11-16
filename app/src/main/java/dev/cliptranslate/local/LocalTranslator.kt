@@ -12,11 +12,11 @@ import kotlinx.coroutines.withContext
 class LocalTranslateException(message: String) : Exception(message)
 
 /**
- * TranslateGemma 4B（GGUF）的本地推理器。
+ * 本地 GGUF 模型的推理器，模型由 [LocalModelCatalog] 决定（当前是 TranslateGemma 4B / Index-Translate 2B）。
  *
  * 懒加载：第一次翻译时才 `ensureLoaded()` → `nativeLoad()`，之后复用 handle；
  * 用户在设置里改了加速方式时，[reloadForBackendChange] 会在 [Mutex] 内立即卸掉旧 handle
- * 并按新后端重载（[ensureHandle] 保留同样的兜底逻辑，防止设置不是从设置页写进来的）。
+ * 并按新后端重载；换了模型则同样先卸后装（同一把锁、同一套兜底逻辑，见 [ensureHandle]）。
  * llama.cpp 的 context 不能并发使用，所以整条调用链用 [Mutex] 串行化。
  * 装载失败（APK 没内置 `.so`、内存不足、模型文件缺失）一律抛 [LocalTranslateException]，
  * 由上层降级成错误提示，不会影响在线翻译。
@@ -29,7 +29,7 @@ class LocalTranslator private constructor(context: Context) {
     /**
      * native handle；0 表示尚未加载。只在 [mutex] 内读写。
      *
-     * 只有「加速方式被用户改过」时才主动 [LlamaBridge.nativeUnload]（见 [reloadForBackendChange]
+     * 只有「加速方式或模型被用户改过」时才主动 [LlamaBridge.nativeUnload]（见 [reloadForBackendChange]
      * 与 [ensureHandle]）：
      * 卸载时若还有生成在跑会让 native 侧出现 use-after-free，而所有读写都在 [mutex] 内，
      * 这里卸载时不可能有生成在跑。其余情况 handle 的生命周期跟着进程走，对用户没有可见影响：
@@ -40,28 +40,38 @@ class LocalTranslator private constructor(context: Context) {
     /** [handle] 是用哪个加速方式加载的；[handle] 为 0 时为 null。只在 [mutex] 内读写。 */
     private var handleBackend: GpuBackend? = null
 
+    /** [handle] 里装的是哪个模型（目录 id）；[handle] 为 0 时为 null。只在 [mutex] 内读写。 */
+    private var handleModelId: String? = null
+
     /** 阻塞式翻译；内部已切到 [Dispatchers.IO]，UI 层直接 await 即可。 */
-    suspend fun translate(text: String, targetCode: String): String = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            val sourceCode = detectSourceCode(text)
-            val prompt = buildLocalPrompt(text.trim(), sourceCode, targetCode)
-            val loaded = ensureHandle()
-            val raw = try {
-                LlamaBridge.nativeGenerate(loaded, prompt, MAX_TOKENS)
-            } catch (e: RuntimeException) {
-                // native 层的 message 已经带错误码/原因，原样向上传（ERR_TOO_LONG 翻译成中文）。
-                throw LocalTranslateException(mapNativeError(e.message))
+    suspend fun translate(text: String, targetCode: String, modelId: String): String =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                val spec = LocalModelCatalog.byId(modelId)
+                val prompt = when (spec.promptStyle) {
+                    LocalModelPromptStyle.GEMMA ->
+                        buildLocalPrompt(text.trim(), detectSourceCode(text), targetCode)
+
+                    LocalModelPromptStyle.INDEX_TRANSLATE ->
+                        buildIndexTranslatePrompt(text.trim(), targetCode)
+                }
+                val loaded = ensureHandle(spec)
+                val raw = try {
+                    LlamaBridge.nativeGenerate(loaded, prompt, MAX_TOKENS)
+                } catch (e: RuntimeException) {
+                    // native 层的 message 已经带错误码/原因，原样向上传（ERR_TOO_LONG 翻译成中文）。
+                    throw LocalTranslateException(mapNativeError(e.message))
+                }
+                raw.trim()
             }
-            raw.trim()
         }
-    }
 
     // --- 加速方式切换 -------------------------------------------------------
 
     /**
      * 加速方式变更后立即卸掉旧模型并按新后端重载，让用户当场知道所选后端能不能用。
      *
-     * 只有模型本来就装载着才重载；没装载时保持懒加载（仅改设置不该白占约 3GB 常驻内存），
+     * 只有模型本来就装载着才重载；没装载时保持懒加载（仅改设置不该白占常驻内存），
      * 下一次翻译会走 [ensureHandle] 按新设置加载。
      * 幂等：handle 已经是当前设置的后端时直接返回成功，快速连点只会真正重载一次。
      * 失败返回 [Result.failure]，此时 [handle] 已归零，不会留下半成品。
@@ -71,10 +81,12 @@ class LocalTranslator private constructor(context: Context) {
             LocalSettings.attach(appContext)
             val backend = LocalSettings.gpuBackend.value
             if (handle == 0L || handleBackend == backend) return@withLock Result.success(Unit)
+            // 重载用当前已装的那个模型；handleModelId 为 null 时才退化成目录默认。
+            val spec = LocalModelCatalog.byId(handleModelId)
             // 先卸再装：峰值内存只驻留一份模型。
             unloadLocked()
             try {
-                loadLocked(backend)
+                loadLocked(backend, spec)
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -84,15 +96,15 @@ class LocalTranslator private constructor(context: Context) {
 
     // --- 加载 ---------------------------------------------------------------
 
-    private fun ensureHandle(): Long {
+    private fun ensureHandle(spec: LocalModelSpec): Long {
         LocalSettings.attach(appContext)
         val backend = LocalSettings.gpuBackend.value
         if (handle != 0L) {
-            if (handleBackend == backend) return handle
-            // 加速方式改了：旧 handle 仍按老后端工作，必须在 mutex 内卸掉再按新设置重载。
+            if (handleBackend == backend && handleModelId == spec.id) return handle
+            // 加速方式或模型改了：旧 handle 必须先在 mutex 内卸掉，再按新设置重载。
             unloadLocked()
         }
-        return loadLocked(backend)
+        return loadLocked(backend, spec)
     }
 
     /** 卸掉当前 handle 并归零；只在 [mutex] 内调用。 */
@@ -101,23 +113,24 @@ class LocalTranslator private constructor(context: Context) {
         LlamaBridge.nativeUnload(handle)
         handle = 0L
         handleBackend = null
+        handleModelId = null
     }
 
     /**
-     * 按 [backend] 装一份新 handle；只在 [mutex] 内调用。
+     * 按 [backend] 装一份 [spec] 的新 handle；只在 [mutex] 内调用。
      *
      * 失败抛 [LocalTranslateException]；[handle] 只在 nativeLoad 成功后才写入，
      * 所以失败时不会留下半成品（旧 handle 由调用方先行 [unloadLocked]）。
      */
-    private fun loadLocked(backend: GpuBackend): Long {
+    private fun loadLocked(backend: GpuBackend, spec: LocalModelSpec): Long {
         if (!LlamaBridge.ensureLoaded()) {
             val detail = LlamaBridge.lastLoadError?.let { "（$it）" } ?: ""
             throw LocalTranslateException(
                 "本地推理库加载失败$detail，请安装最新 CI 构建的版本",
             )
         }
-        checkAvailableMemory()
-        val model = ModelManager.get(appContext).modelFile
+        checkAvailableMemory(spec)
+        val model = ModelManager.get(appContext).modelFile(spec.id)
         if (!model.exists()) {
             throw LocalTranslateException("本地模型文件不存在，请先在设置中下载")
         }
@@ -131,6 +144,7 @@ class LocalTranslator private constructor(context: Context) {
         }
         handle = loaded
         handleBackend = backend
+        handleModelId = spec.id
         return loaded
     }
 
@@ -166,21 +180,27 @@ class LocalTranslator private constructor(context: Context) {
     }
 
     /**
-     * 4B Q4_K_M 常驻约 3GB，加载前先看可用内存，不够就给可读提示而不是被系统杀掉。
+     * 加载前先看可用内存，不够就给可读提示而不是被系统杀掉。
      *
-     * 阈值默认 4GB，开发者模式下可在 2.5~4.5GB 之间调整（[DevSettings.memoryThresholdGb]）。
+     * 阈值：开发者模式下用户手动设过就用那个值（2.5~4.5GB），没设过就用模型自带的
+     * [LocalModelSpec.defaultMemoryThresholdGb] —— 4B 模型约 3GB、2B 模型约 1.5GB 常驻，
+     * 统一阈值会让小模型在低内存机型上被无谓地拒绝。
      * 刚卸载旧后端会话时，释放的页要过一两秒才被内核回收计进 availMem，第一次读数会
      * 假性偏低（16GB 机型实测：卸载 NPU 后立即读 4.2GB、约 1 秒后恢复到 4.5GB+），
      * 所以按 1 秒间隔重试取最高值，全部不达标才报错。
      */
-    private fun checkAvailableMemory() {
+    private fun checkAvailableMemory(spec: LocalModelSpec) {
         val manager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             ?: return
         DevSettings.attach(appContext)
-        val thresholdGb = DevSettings.memoryThresholdGb.value.coerceIn(
-            DevSettings.MIN_MEMORY_THRESHOLD_GB,
-            DevSettings.MAX_MEMORY_THRESHOLD_GB,
-        )
+        val thresholdGb = if (DevSettings.hasCustomMemoryThreshold()) {
+            DevSettings.memoryThresholdGb.value.coerceIn(
+                DevSettings.MIN_MEMORY_THRESHOLD_GB,
+                DevSettings.MAX_MEMORY_THRESHOLD_GB,
+            )
+        } else {
+            spec.defaultMemoryThresholdGb
+        }
         val thresholdBytes = (thresholdGb * 1024f * 1024f * 1024f).toLong()
         val info = ActivityManager.MemoryInfo()
         var best = 0L
@@ -256,10 +276,42 @@ private val LANGUAGE_NAMES: Map<String, String> = mapOf(
 internal fun englishLanguageName(code: String): String = LANGUAGE_NAMES[code] ?: code
 
 /**
+ * App 语言代码 → Index-Translate 提示词里用的中文语言名。
+ *
+ * 该模型训练时用的是中文语言全名，写英文名会明显掉质量；繁简在提示词里也要区分，
+ * 否则 zh-TW 会被译成简体。未列出的代码原样使用。
+ */
+private val INDEX_LANGUAGE_NAMES: Map<String, String> = mapOf(
+    "zh-CN" to "中文",
+    "zh-TW" to "繁体中文",
+    "en" to "英语",
+    "ja" to "日语",
+    "ko" to "韩语",
+    "fr" to "法语",
+    "de" to "德语",
+    "es" to "西班牙语",
+    "ru" to "俄语",
+    "pt" to "葡萄牙语",
+    "it" to "意大利语",
+    "ar" to "阿拉伯语",
+    "th" to "泰语",
+    "vi" to "越南语",
+    "id" to "印尼语",
+    "tr" to "土耳其语",
+    "pl" to "波兰语",
+    "nl" to "荷兰语",
+    "hi" to "印地语",
+    "uk" to "乌克兰语",
+)
+
+internal fun indexLanguageName(code: String): String = INDEX_LANGUAGE_NAMES[code] ?: code
+
+/**
  * 源语言启发式检测：TranslateGemma 要求必须给出源语言，而 App 不要求用户选源语言。
  *
  * 顺序即优先级：假名最高（日文里混着大量汉字，先认假名才不会误判成中文），
  * 之后依次 Hangul / 泰文 / 天城文 / 阿拉伯文 / 西里尔 / 汉字，全不匹配按英语处理。
+ * Index-Translate 的提示词不需要源语言，这套检测只服务 GEMMA 风格的模型。
  */
 internal fun detectSourceCode(text: String): String {
     var hangul = false
@@ -319,3 +371,17 @@ internal fun buildLocalPrompt(text: String, sourceCode: String, targetCode: Stri
         append("<start_of_turn>model\n")
     }
 }
+
+/**
+ * Index-Translate（Qwen3 风格 chat template）在 `enable_thinking=false` 时的展开形式，
+ * 必须逐字一致：提示词里已经带上了空的 `<think>` 段，模型才会直接开始输出译文。
+ *
+ * 官方提示词用中文语言全名；结尾的两个换行对应模板的 `<think>\n\n</think>\n\n`，
+ * 少一个都会改变生成起点。
+ */
+internal fun buildIndexTranslatePrompt(text: String, targetCode: String): String =
+    "<|im_start|>user\n" +
+        "请将以下文本翻译为${indexLanguageName(targetCode)}，直接输出翻译结果，不要进行任何解释：\n\n" +
+        "$text<|im_end|>\n" +
+        "<|im_start|>assistant\n" +
+        "<think>\n\n</think>\n\n"

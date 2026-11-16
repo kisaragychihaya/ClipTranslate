@@ -8,6 +8,9 @@ import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
 import dev.cliptranslate.data.isBuiltin
 import dev.cliptranslate.local.GpuBackend
+import dev.cliptranslate.local.LocalModelCatalog
+import dev.cliptranslate.local.LocalModelRequirements
+import dev.cliptranslate.local.LocalModelSpec
 import dev.cliptranslate.local.LocalSettings
 import dev.cliptranslate.local.LocalTranslateException
 import dev.cliptranslate.local.LocalTranslator
@@ -19,9 +22,13 @@ import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import dev.cliptranslate.net.ModelInfo as NetModelInfo
@@ -41,10 +48,42 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _providers = MutableStateFlow<List<Provider>>(emptyList())
     val providers: StateFlow<List<Provider>> = _providers.asStateFlow()
 
-    val modelState: StateFlow<ModelState> = modelManager.state
+    /**
+     * 本机能跑的本地模型（目录顺序）。构造时算一次即可：设备总内存不会变。
+     * 只有「一个模型都跑不动」时才会是空列表，此时设置页整张本地模型卡片都不显示。
+     */
+    val localModels: List<LocalModelSpec> = LocalModelRequirements.supportedModels(application)
+
+    /** 卡片里当前选中的本地模型；下载/删除/状态行都跟着它走。 */
+    private val _selectedLocalModelId = MutableStateFlow(
+        localModels.firstOrNull()?.id ?: LocalModelCatalog.DEFAULT_MODEL_ID,
+    )
+    val selectedLocalModelId: StateFlow<String> = _selectedLocalModelId.asStateFlow()
+
+    /**
+     * 下载/校验状态跟随选中的模型。
+     *
+     * 用 flatMapLatest 换状态流而不是让 Screen 按 id 自己收集：切换模型时状态行必须立刻切到
+     * 新模型的进度，否则会残留上一个模型的「已就绪」，用户会以为新模型也下载好了。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val modelState: StateFlow<ModelState> = _selectedLocalModelId
+        .flatMapLatest { modelManager.stateOf(it) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            modelManager.stateOf(_selectedLocalModelId.value).value,
+        )
 
     /** 是否有 `.part` 残档 —— 按钮文案在「下载」和「继续下载」之间切换。 */
-    val hasPartialModel: StateFlow<Boolean> = modelManager.hasPartial
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val hasPartialModel: StateFlow<Boolean> = _selectedLocalModelId
+        .flatMapLatest { modelManager.hasPartialOf(it) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            modelManager.hasPartialOf(_selectedLocalModelId.value).value,
+        )
 
     /** 「启用本地离线翻译」开关（持久化在 app_prefs，与翻译页共享）。 */
     val localEnabled: StateFlow<Boolean> = LocalSettings.enabled
@@ -86,16 +125,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     // --- 本地模型 -----------------------------------------------------------
 
+    /** 切换卡片里选中的本地模型；未收录的 id 退回目录默认，避免状态流指向不存在的会话。 */
+    fun selectLocalModel(id: String) {
+        _selectedLocalModelId.value = LocalModelCatalog.byId(id).id
+    }
+
     fun downloadModel() {
-        modelManager.download()
+        modelManager.download(_selectedLocalModelId.value)
     }
 
     fun cancelModelDownload() {
-        modelManager.cancelDownload()
+        modelManager.cancelDownload(_selectedLocalModelId.value)
     }
 
     fun deleteModel() {
-        modelManager.deleteModel()
+        modelManager.deleteModel(_selectedLocalModelId.value)
     }
 
     fun setLocalEnabled(enabled: Boolean) {

@@ -2,6 +2,8 @@ package dev.cliptranslate.data
 
 import android.content.Context
 import dev.cliptranslate.R
+import dev.cliptranslate.local.LocalModelCatalog
+import dev.cliptranslate.local.LocalModelRequirements
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -50,16 +52,22 @@ class ProviderRepository(context: Context) {
 
     // --- 内置 Provider -------------------------------------------------------
     // 本地 GGUF 推理，没有 baseUrl / apiKey；名称取自 strings.xml，UI 与数据层共用一份文案。
-    private fun builtinProviders(): List<Provider> = listOf(
-        Provider(
-            id = LOCAL_PROVIDER_ID,
-            name = appContext.getString(R.string.local_provider_name),
-            baseUrl = "",
-            apiKey = "",
-            models = listOf(ModelInfo(LOCAL_MODEL_ID)),
-            defaultModelId = LOCAL_MODEL_ID,
-        ),
-    )
+    // models 只列本机内存跑得动的模型（内存不足的机型不显示 4B），defaultModelId 取第一个。
+    private fun builtinProviders(): List<Provider> {
+        val runnable = LocalModelRequirements.supportedModels(appContext)
+            .ifEmpty { LocalModelCatalog.models.take(1) }
+        val models = runnable.map { ModelInfo(it.id) }
+        return listOf(
+            Provider(
+                id = LOCAL_PROVIDER_ID,
+                name = appContext.getString(R.string.local_provider_name),
+                baseUrl = "",
+                apiKey = "",
+                models = models,
+                defaultModelId = models.first().id,
+            ),
+        )
+    }
 
     /** 存储里的用户 Provider（含历史遗留的同 id 脏数据，一并过滤掉）。 */
     private fun readUserProviders(): List<Provider> {

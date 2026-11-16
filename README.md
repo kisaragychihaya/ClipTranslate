@@ -11,7 +11,7 @@
 - **剪贴板自动填入**：复制文本后切回模译，内容自动带入输入框；也可以点「粘贴」手动再读一次，或直接输入。
 - **目标语言选择**：简体中文、繁体中文、英语、日语等 20 种语言，默认简体中文。
 - **在线翻译**：任意 OpenAI 兼容服务。可配置多个 Provider，填好 Base URL 和 API Key 后一键拉取模型列表，勾选即可添加。
-- **离线本地翻译**：内置 TranslateGemma 4B（GGUF Q4_K_M，约 2.3 GB），模型存放在应用私有目录、卸载应用时自动删除；推理由 llama.cpp 完成，可选「自动（GPU 优先）/ 仅 CPU / Adreno GPU (OpenCL) / Hexagon NPU（实验）」加速方式，切换时自动卸载并重新加载模型。
+- **离线本地翻译**：内置两个 GGUF（Q4_K_M）模型，可在设置里切换：TranslateGemma 4B（约 2.3 GB，需 8 GiB 以上机身内存）与 Index-Translate 2B（约 1.2 GB，4 GiB 机型也能用）。模型存放在应用私有目录、卸载应用时自动删除；推理由 llama.cpp 完成，可选「自动（GPU 优先）/ 仅 CPU / Adreno GPU (OpenCL) / Hexagon NPU（实验）」加速方式，切换时自动卸载并重新加载模型。
 - **译文一键复制**：点译文卡片右上角的复制按钮即可把结果放进剪贴板。
 
 ## 使用方法
@@ -24,7 +24,7 @@
 
 ### 本地离线模型
 
-设置 →「本地模型（离线翻译）」→ 点「下载」获取约 2.3 GB 的模型（支持断点续传，下载完成后校验 SHA-256）。
+设置 →「本地模型（离线翻译）」→ 在「模型」下拉里选择要用的模型，再点「下载」（TranslateGemma 4B 约 2.3 GB，Index-Translate 2B 约 1.2 GB；内存小的机型只列出跑得动的模型）。下载支持断点续传，完成后校验 SHA-256；两个模型可以各自下载，互不影响。
 
 <img src="docs/screenshots/02-download.png" width="320" alt="模型下载中：显示进度与已下载大小">
 
@@ -59,7 +59,7 @@ GPU 与 NPU 加速属实验功能，出现异常时切回「仅 CPU」；模型�
 
 - **构建**：APK 由 GitHub Actions（`.github/workflows/build-apk.yml`）构建，push main、push `v*` tag 或手动触发，产物在 Actions 的 artifact 里。
 - **本地环境**：不需要安装 Android SDK。装好 JDK 21 和 `kotlinc` 后运行 `bash tools/qc/syntax-check.sh`，做 Kotlin 语法检查。
-- **开发者模式**：在关于页按住应用图标 3 秒开启，设置页会出现「开发者选项」，可开关调试日志、调整本地模型加载前的内存预检阈值（2.5~4.5 GB，默认 4 GB）；再长按一次即可关闭。
+- **开发者模式**：在关于页按住应用图标 3 秒开启，设置页会出现「开发者选项」，可开关调试日志、调整本地模型加载前的内存预检阈值（2.5~4.5 GB；未手动设置时按所选模型取默认值，4B 为 4 GB、2B 为 2 GB）；再长按一次即可关闭。
 
 <img src="docs/screenshots/05-developer.png" width="320" alt="开发者选项：调试日志开关">
 
@@ -78,5 +78,6 @@ GPU 与 NPU 加速属实验功能，出现异常时切回「仅 CPU」；模型�
 - [Kotlin](https://kotlinlang.org) — Apache-2.0
 - [kotlinx-coroutines](https://github.com/Kotlin/kotlinx.coroutines) — Apache-2.0
 - [TranslateGemma-4B（GGUF）](https://www.modelscope.cn/models/42ailab/TranslateGemma-4B-GGUF) — Gemma Terms of Use
+- [Index-Translate-2B（GGUF）](https://www.modelscope.cn/models/IndexTeam/Index-Translate-2B-GGUF) — Apache-2.0
 
 以上组件的源项目链接同样可以在应用「关于」页点击打开。
