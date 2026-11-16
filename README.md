@@ -57,7 +57,7 @@ GPU 与 NPU 加速属实验功能，出现异常时切回「仅 CPU」；模型�
 
 ## 开发者
 
-- **构建**：APK 由 GitHub Actions（`.github/workflows/build-apk.yml`）构建，push main、push `v*` tag 或手动触发，产物在 Actions 的 artifact 里。
+- **构建**：APK 由 GitHub Actions（`.github/workflows/build-apk.yml`）构建。普通 push main 与手动触发只构建 debug 包（ADB 真机验证用）；push `v*` tag 才构建 release 包并发布 GitHub Release。产物在 Actions 的 artifact 里。
 - **本地环境**：不需要安装 Android SDK。装好 JDK 21 和 `kotlinc` 后运行 `bash tools/qc/syntax-check.sh`，做 Kotlin 语法检查。
 - **开发者模式**：在关于页按住应用图标 3 秒开启，设置页会出现「开发者选项」，可开关调试日志、调整本地模型加载前的内存预检阈值（2.5~4.5 GB；未手动设置时按所选模型取默认值，4B 为 4 GB、2B 为 2 GB）；再长按一次即可关闭。
 

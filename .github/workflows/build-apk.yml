@@ -1,4 +1,4 @@
-name: Build ClipTranslate Release APK
+name: Build ClipTranslate APK
 
 on:
   workflow_dispatch:
@@ -34,13 +34,23 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # 普通 push / 手动触发只构建 debug 包（省一半构建时间，也足够 ADB 真机验证）；
+      # 只有打 v* tag 才走 release 构建 + 签名 + GitHub Release。
       - name: Build Release APK
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: ./gradlew :app:assembleRelease --stacktrace
+
+      # debug 包用于 ADB 真机验证本地推理：debuggable 才能 run-as 把 GGUF 推进
+      # /data/data/dev.cliptranslate/files/ 里，且不受 release 签名配置影响。
+      # 发布 tag 时不构建 debug 包。
+      - name: Build Debug APK
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: ./gradlew :app:assembleDebug --stacktrace
 
       # 守卫：externalNativeBuild 失败/被跳过时 AGP 仍可能产出一个没有 .so 的 APK，
       # 那种包在真机上只会给出「推理库未内置」。这里直接让 CI 红掉，省一轮人工排查。
@@ -49,7 +59,7 @@ jobs:
       - name: Verify native library is packaged
         run: |
           set -euo pipefail
-          for apk in app/build/outputs/apk/release/*.apk; do
+          for apk in app/build/outputs/apk/*/*.apk; do
             echo "--- $apk"
             if ! unzip -l "$apk" | grep -q "lib/arm64-v8a/libcliptranslate_jni.so"; then
               echo "::error::$apk 里没有 lib/arm64-v8a/libcliptranslate_jni.so（native 构建没跑或没被打包）"
@@ -98,18 +108,12 @@ jobs:
           done
 
       - name: Upload APK artifact
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: cliptranslate-release-apk
           path: app/build/outputs/apk/release/*.apk
           retention-days: 7
-
-      # debug 包用于 ADB 真机验证本地推理：debuggable 才能 run-as 把 GGUF 推进
-      # /data/data/dev.cliptranslate/files/ 里，且不受 release 签名配置影响。
-      # 发布 tag 时不构建 debug 包。
-      - name: Build Debug APK
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: ./gradlew :app:assembleDebug --stacktrace
 
       - name: Upload Debug APK artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
