@@ -3,7 +3,7 @@ name: Build ClipTranslate APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
 
 jobs:
