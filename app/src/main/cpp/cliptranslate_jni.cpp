@@ -736,20 +736,35 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
         // -------------------------------------------------------------------
         if (!mmproj.empty()) {
             mtmd_context_params mparams = mtmd_context_params_default();
-            // 视觉编码器固定跑 CPU。默认值 use_gpu=true + device=nullptr 时 mtmd 会自己
-            // 挑第一个 GPU/IGPU 设备，而在我们的构建里那就是 Hexagon NPU 或 Adreno
-            // OpenCL：ViT 的算子覆盖度没验证过，Q8_0 的 mmproj 又占约 345MB 显存，
-            // 失败形态是加载即崩或者整个进程被杀（Vulkan 就是这么没了）。
-            // 编码一张图在 CPU 上是秒级，稳定压倒速度；文本 decode 用的仍是上面选好的
-            // 后端，两者互不影响 —— mtmd 只把图算成 embedding 再交给 llama_decode。
-            mparams.use_gpu = false;
-            mparams.device = nullptr;
+            // 实验（dev 分支）：视觉编码器尝试 NPU（Hexagon）。mtmd 内部用
+            // ggml_backend_sched 多后端调度、CPU 兜底，NPU 不支持的算子会自动回落
+            // CPU 而不是崩溃（见 tools/mtmd/mtmd-subcontext.cpp，backend_cpu 永远在
+            // sched 最后一个）；装载失败也在下面用 CPU 重试一次，不会击穿加载。
+            // 日志里 "mtmd_backends: using XXX backend" 和 htp 的 op 日志能直接看出
+            // 哪些算子真的跑在了 NPU 上。
+            if (ggml_backend_dev_t vision_dev = pick_device(kGpuHexagon)) {
+                mparams.use_gpu = true;
+                mparams.device = vision_dev;
+                LOGI("nativeLoad: vision encoder try device=%s desc=%s (experiment)",
+                     ggml_backend_dev_name(vision_dev), ggml_backend_dev_description(vision_dev));
+            } else {
+                mparams.use_gpu = false;
+                mparams.device = nullptr;
+                LOGI("nativeLoad: no NPU device for vision encoder, using CPU");
+            }
             mparams.print_timings = false;  // 每次请求自己打耗时，别刷屏
             mparams.warmup = true;          // 装载时先空跑一次 ViT，坏 mmproj 早失败
             if (n_threads > 0) {
                 mparams.n_threads = n_threads;
             }
             session->mtmd = mtmd_init_from_file(mmproj.c_str(), session->model, mparams);
+            if (session->mtmd == nullptr && mparams.use_gpu) {
+                // NPU 上装载失败（vmem 不够、DSP 拒绝等）：退回 CPU 再试，加载不失败。
+                LOGW("nativeLoad: mtmd on NPU failed, retrying vision encoder on CPU");
+                mparams.use_gpu = false;
+                mparams.device = nullptr;
+                session->mtmd = mtmd_init_from_file(mmproj.c_str(), session->model, mparams);
+            }
             if (session->mtmd == nullptr) {
                 LOGE("nativeLoad: mtmd_init_from_file failed (mmproj=%s)", mmproj.c_str());
                 release_fields(session);
