@@ -736,21 +736,28 @@ Java_dev_cliptranslate_local_LlamaBridge_nativeLoad(
         // -------------------------------------------------------------------
         if (!mmproj.empty()) {
             mtmd_context_params mparams = mtmd_context_params_default();
-            // 实验（dev 分支）：视觉编码器尝试 NPU（Hexagon）。mtmd 内部用
-            // ggml_backend_sched 多后端调度、CPU 兜底，NPU 不支持的算子会自动回落
-            // CPU 而不是崩溃（见 tools/mtmd/mtmd-subcontext.cpp，backend_cpu 永远在
-            // sched 最后一个）；装载失败也在下面用 CPU 重试一次，不会击穿加载。
-            // 日志里 "mtmd_backends: using XXX backend" 和 htp 的 op 日志能直接看出
-            // 哪些算子真的跑在了 NPU 上。
-            if (ggml_backend_dev_t vision_dev = pick_device(kGpuHexagon)) {
+            // 视觉编码器跟随文本后端：文本装载在 NPU（Hexagon）上时视觉也上 NPU ——
+            // 真机实测编码提速 10~15 倍（768x1024 从 24s 降到 1.6s）且零算子回落；
+            // 其余情况（CPU/OpenCL 文本后端）保持 CPU。OpenCL 的 ViT 算子覆盖未验证，
+            // 不主动用。mtmd 的 sched 自带 CPU 兜底，装载失败也在下面整体退回 CPU
+            // 重试一次，不会击穿加载。
+            ggml_backend_dev_t vision_dev = nullptr;
+            if (!selected.empty() && selected[0] != nullptr) {
+                auto is_hexagon = [](ggml_backend_dev_t dev) {
+                    return device_matches(dev, "htp") || device_matches(dev, "hexagon");
+                };
+                if (is_hexagon(selected[0])) {
+                    vision_dev = selected[0];
+                }
+            }
+            if (vision_dev != nullptr) {
                 mparams.use_gpu = true;
                 mparams.device = vision_dev;
-                LOGI("nativeLoad: vision encoder try device=%s desc=%s (experiment)",
+                LOGI("nativeLoad: vision encoder device=%s desc=%s (follows text backend)",
                      ggml_backend_dev_name(vision_dev), ggml_backend_dev_description(vision_dev));
             } else {
                 mparams.use_gpu = false;
                 mparams.device = nullptr;
-                LOGI("nativeLoad: no NPU device for vision encoder, using CPU");
             }
             mparams.print_timings = false;  // 每次请求自己打耗时，别刷屏
             mparams.warmup = true;          // 装载时先空跑一次 ViT，坏 mmproj 早失败
