@@ -12,11 +12,22 @@ import kotlinx.coroutines.withContext
 class LocalTranslateException(message: String) : Exception(message)
 
 /**
+ * 已解码、已降采样的图片，供图片翻译使用。
+ *
+ * [rgb] 是紧密排列的 RGB 三字节/像素（无 alpha、无行填充）：native 侧直接按这个布局
+ * 喂给视觉投影，Kotlin 侧在这里一次性把 Bitmap 的 ARGB 摊平成它要的形状，
+ * 避免 JNI 边界上来回转换。
+ */
+data class DecodedImage(val rgb: ByteArray, val width: Int, val height: Int)
+
+/**
  * 本地 GGUF 模型的推理器，模型由 [LocalModelCatalog] 决定（当前是 TranslateGemma 4B / Index-Translate 2B）。
  *
  * 懒加载：第一次翻译时才 `ensureLoaded()` → `nativeLoad()`，之后复用 handle；
  * 用户在设置里改了加速方式时，[reloadForBackendChange] 会在 [Mutex] 内立即卸掉旧 handle
  * 并按新后端重载；换了模型则同样先卸后装（同一把锁、同一套兜底逻辑，见 [ensureHandle]）。
+ * 图片翻译多一个维度：handle 是否带视觉投影（mmproj）也要匹配 —— 纯文本 handle 收到图片
+ * 请求时同样先卸再按带 mmproj 的路径重载一次。
  * llama.cpp 的 context 不能并发使用，所以整条调用链用 [Mutex] 串行化。
  * 装载失败（APK 没内置 `.so`、内存不足、模型文件缺失）一律抛 [LocalTranslateException]，
  * 由上层降级成错误提示，不会影响在线翻译。
@@ -43,26 +54,65 @@ class LocalTranslator private constructor(context: Context) {
     /** [handle] 里装的是哪个模型（目录 id）；[handle] 为 0 时为 null。只在 [mutex] 内读写。 */
     private var handleModelId: String? = null
 
-    /** 阻塞式翻译；内部已切到 [Dispatchers.IO]，UI 层直接 await 即可。 */
-    suspend fun translate(text: String, targetCode: String, modelId: String): String =
+    /** [handle] 是否带了视觉投影（mmproj）；[handle] 为 0 时为 false。只在 [mutex] 内读写。 */
+    private var handleHasVision: Boolean = false
+
+    /**
+     * 阻塞式翻译；内部已切到 [Dispatchers.IO]，UI 层直接 await 即可。
+     *
+     * [image] 非 null 时走图片翻译：此时 [text] 不再是被翻译的内容，而是可选的「附加要求」
+     * （为空就不加），提示词见 [buildIndexTranslateImagePrompt]。纯文本路径与之前逐字一致。
+     */
+    suspend fun translate(
+        text: String,
+        targetCode: String,
+        modelId: String,
+        image: DecodedImage? = null,
+    ): String =
         withContext(Dispatchers.IO) {
             mutex.withLock {
                 val spec = LocalModelCatalog.byId(modelId)
-                val prompt = when (spec.promptStyle) {
-                    LocalModelPromptStyle.GEMMA ->
-                        buildLocalPrompt(text.trim(), detectSourceCode(text), targetCode)
+                if (image == null) {
+                    val prompt = when (spec.promptStyle) {
+                        LocalModelPromptStyle.GEMMA ->
+                            buildLocalPrompt(text.trim(), detectSourceCode(text), targetCode)
 
-                    LocalModelPromptStyle.INDEX_TRANSLATE ->
-                        buildIndexTranslatePrompt(text.trim(), targetCode)
+                        LocalModelPromptStyle.INDEX_TRANSLATE ->
+                            buildIndexTranslatePrompt(text.trim(), targetCode)
+                    }
+                    val loaded = ensureHandle(spec, withVision = false)
+                    val raw = try {
+                        LlamaBridge.nativeGenerate(loaded, prompt, MAX_TOKENS)
+                    } catch (e: RuntimeException) {
+                        // native 层的 message 已经带错误码/原因，原样向上传（ERR_TOO_LONG 翻译成中文）。
+                        throw LocalTranslateException(mapNativeError(e.message))
+                    }
+                    raw.trim()
+                } else {
+                    // 只有多模态的 Index-Translate 有图片模板；别的模型给图只会得到胡说八道，
+                    // 干脆按能力不足拒掉（UI 也不会显示图片入口）。
+                    if (spec.promptStyle != LocalModelPromptStyle.INDEX_TRANSLATE) {
+                        throw LocalTranslateException("当前模型不支持图片翻译")
+                    }
+                    val prompt = buildIndexTranslateImagePrompt(
+                        targetCode,
+                        extraInstruction = text.trim().ifBlank { null },
+                    )
+                    val loaded = ensureHandle(spec, withVision = true)
+                    val raw = try {
+                        LlamaBridge.nativeGenerateImage(
+                            loaded,
+                            prompt,
+                            image.rgb,
+                            image.width,
+                            image.height,
+                            MAX_TOKENS,
+                        )
+                    } catch (e: RuntimeException) {
+                        throw LocalTranslateException(mapNativeError(e.message))
+                    }
+                    raw.trim()
                 }
-                val loaded = ensureHandle(spec)
-                val raw = try {
-                    LlamaBridge.nativeGenerate(loaded, prompt, MAX_TOKENS)
-                } catch (e: RuntimeException) {
-                    // native 层的 message 已经带错误码/原因，原样向上传（ERR_TOO_LONG 翻译成中文）。
-                    throw LocalTranslateException(mapNativeError(e.message))
-                }
-                raw.trim()
             }
         }
 
@@ -83,10 +133,13 @@ class LocalTranslator private constructor(context: Context) {
             if (handle == 0L || handleBackend == backend) return@withLock Result.success(Unit)
             // 重载用当前已装的那个模型；handleModelId 为 null 时才退化成目录默认。
             val spec = LocalModelCatalog.byId(handleModelId)
+            // 保持当前 handle 的视觉能力：改成 CPU 不该悄悄把图片翻译弄没了。
+            // 但附件已经不在磁盘上时不再强行带 mmproj，否则一次改后端会被翻译成「请先下载视觉投影」。
+            val withVision = handleHasVision && attachmentPathOrNull(spec) != null
             // 先卸再装：峰值内存只驻留一份模型。
             unloadLocked()
             try {
-                loadLocked(backend, spec)
+                loadLocked(backend, spec, withVision)
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -96,15 +149,24 @@ class LocalTranslator private constructor(context: Context) {
 
     // --- 加载 ---------------------------------------------------------------
 
-    private fun ensureHandle(spec: LocalModelSpec): Long {
+    /**
+     * 拿到可用的 handle；[withVision] 表示调用方要用视觉能力（图片翻译）。
+     *
+     * 匹配条件不只是「模型 + 加速方式」，还包含「有没有装视觉投影」：纯文本 handle 收到图片请求时
+     * 必须重载一次，否则 native 侧根本没有图片编码器。
+     */
+    private fun ensureHandle(spec: LocalModelSpec, withVision: Boolean): Long {
         LocalSettings.attach(appContext)
         val backend = LocalSettings.gpuBackend.value
         if (handle != 0L) {
-            if (handleBackend == backend && handleModelId == spec.id) return handle
-            // 加速方式或模型改了：旧 handle 必须先在 mutex 内卸掉，再按新设置重载。
+            val matches = handleBackend == backend &&
+                handleModelId == spec.id &&
+                (!withVision || handleHasVision)
+            if (matches) return handle
+            // 加速方式/模型/视觉能力改了：旧 handle 必须先在 mutex 内卸掉，再按新设置重载。
             unloadLocked()
         }
-        return loadLocked(backend, spec)
+        return loadLocked(backend, spec, withVision)
     }
 
     /** 卸掉当前 handle 并归零；只在 [mutex] 内调用。 */
@@ -114,15 +176,19 @@ class LocalTranslator private constructor(context: Context) {
         handle = 0L
         handleBackend = null
         handleModelId = null
+        handleHasVision = false
     }
 
     /**
      * 按 [backend] 装一份 [spec] 的新 handle；只在 [mutex] 内调用。
      *
+     * [withVision] 为 true 时把视觉投影附件一并交给 native；附件没下载就抛可读提示，
+     * 不会退化成「加载了一个没视觉的模型然后拿图片去生成」。
+     *
      * 失败抛 [LocalTranslateException]；[handle] 只在 nativeLoad 成功后才写入，
      * 所以失败时不会留下半成品（旧 handle 由调用方先行 [unloadLocked]）。
      */
-    private fun loadLocked(backend: GpuBackend, spec: LocalModelSpec): Long {
+    private fun loadLocked(backend: GpuBackend, spec: LocalModelSpec, withVision: Boolean): Long {
         if (!LlamaBridge.ensureLoaded()) {
             val detail = LlamaBridge.lastLoadError?.let { "（$it）" } ?: ""
             throw LocalTranslateException(
@@ -134,18 +200,45 @@ class LocalTranslator private constructor(context: Context) {
         if (!model.exists()) {
             throw LocalTranslateException("本地模型文件不存在，请先在设置中下载")
         }
+        val mmprojPath = if (withVision) {
+            attachmentPathOrNull(spec)
+                ?: throw LocalTranslateException("图片翻译需要先在设置中下载视觉投影")
+        } else {
+            ""
+        }
         val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 6)
         // NPU 需要 skel 库在真实文件路径上（fastrpc 按路径加载），先解压 assets 里的副本。
         // auto 也可能选中 NPU，同样先备好。
         val skelDir = if (backend == GpuBackend.NPU || backend == GpuBackend.AUTO) extractSkels() else ""
-        val loaded = LlamaBridge.nativeLoad(model.absolutePath, threads, CONTEXT_SIZE, backend.value, skelDir)
+        val loaded = LlamaBridge.nativeLoad(
+            model.absolutePath,
+            threads,
+            CONTEXT_SIZE,
+            backend.value,
+            skelDir,
+            mmprojPath,
+        )
         if (loaded == 0L) {
             throw LocalTranslateException(loadFailureMessage(backend))
         }
         handle = loaded
         handleBackend = backend
         handleModelId = spec.id
+        handleHasVision = mmprojPath.isNotEmpty()
         return loaded
+    }
+
+    /**
+     * 视觉投影附件的绝对路径；模型没有附件、附件不在磁盘上或大小不符（下载没完成/被删了一半）
+     * 时返回 null，调用方据此把它当成「未就绪」。
+     *
+     * 这里只查大小不重算 SHA256：下载链路已经校验过，每次加载都重算 345MB 会让首次翻译卡几十秒。
+     */
+    private fun attachmentPathOrNull(spec: LocalModelSpec): String? {
+        val attachment = spec.mmproj ?: return null
+        val file = ModelManager.get(appContext).attachmentFile(spec.id) ?: return null
+        if (!file.exists() || file.length() != attachment.sizeBytes) return null
+        return file.absolutePath
     }
 
     /**
@@ -385,3 +478,29 @@ internal fun buildIndexTranslatePrompt(text: String, targetCode: String): String
         "$text<|im_end|>\n" +
         "<|im_start|>assistant\n" +
         "<think>\n\n</think>\n\n"
+
+/** 图片在提示词里的占位符；native 侧会把它替换成真正的图片 marker（见 [LlamaBridge.nativeGenerateImage]）。 */
+internal const val IMAGE_PROMPT_PLACEHOLDER = "__IMAGE__"
+
+/**
+ * Index-Translate 的图片翻译提示词：图片占位符放在 user 内容的开头，后面才是指令。
+ *
+ * [extraInstruction] 是用户在输入框里写的附加要求（例如「保留原文分行」），为空时整段不加 ——
+ * 图片模式下输入框不再是被翻译的正文，所以空输入是正常情况，不能塞进一个空行。
+ * 结尾的 `<think>` 段与 [buildIndexTranslatePrompt] 同款，模型才会直接开始输出译文。
+ */
+internal fun buildIndexTranslateImagePrompt(
+    targetCode: String,
+    extraInstruction: String?,
+): String {
+    val extra = extraInstruction?.trim().orEmpty()
+    return buildString {
+        append("<|im_start|>user\n")
+        append(IMAGE_PROMPT_PLACEHOLDER).append('\n')
+        append("请将图片中的文本翻译为${indexLanguageName(targetCode)}，直接输出翻译结果，不要进行任何解释。")
+        if (extra.isNotEmpty()) append('\n').append(extra)
+        append("<|im_end|>\n")
+        append("<|im_start|>assistant\n")
+        append("<think>\n\n</think>\n\n")
+    }
+}

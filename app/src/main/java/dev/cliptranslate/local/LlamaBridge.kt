@@ -73,10 +73,35 @@ object LlamaBridge {
     /**
      * @param gpuBackend 0=自动（GPU 优先）/ 1=仅 CPU / 2=OpenCL / 4=Hexagon NPU，见 [GpuBackend]。
      * @param skelDir Hexagon skel 库目录（仅 gpuBackend=4 时需要，其余传空串）。
-     *   返回 0 表示加载失败（含所选 GPU 后端不可用）。
+     * @param mmprojPath 视觉投影（mmproj）文件的绝对路径；空串表示不启用视觉能力。
+     *   只有 Index-Translate 这类多模态模型才有对应附件，纯文本模型的加载路径与之前完全一致。
+     *   返回 0 表示加载失败（含所选 GPU 后端不可用、mmproj 与主模型不匹配）。
      */
-    external fun nativeLoad(modelPath: String, nThreads: Int, nCtx: Int, gpuBackend: Int, skelDir: String): Long
+    external fun nativeLoad(
+        modelPath: String,
+        nThreads: Int,
+        nCtx: Int,
+        gpuBackend: Int,
+        skelDir: String,
+        mmprojPath: String,
+    ): Long
+
+    /** 纯文本生成；handle 是用 [nativeLoad] 且带 mmproj 加载的也能用（此时等同于关掉视觉的对话）。 */
     external fun nativeGenerate(handle: Long, prompt: String, maxTokens: Int): String
+
+    /**
+     * 图片生成：[rgb] 是紧密排列的 RGB 三字节/像素（无 alpha、无行填充），
+     * 由 Kotlin 侧解码降采样后传入；[prompt] 里的 `__IMAGE__` 占位符由 native 侧替换成真正的图片 marker。
+     */
+    external fun nativeGenerateImage(
+        handle: Long,
+        prompt: String,
+        rgb: ByteArray,
+        width: Int,
+        height: Int,
+        maxTokens: Int,
+    ): String
+
     external fun nativeUnload(handle: Long)
 
     /** 调试日志总开关（关闭时 native 侧只保留 ERROR）。走 [applyLogEnabled]，不要直接调。 */

@@ -3,7 +3,12 @@ package dev.cliptranslate.ui.translate
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -25,10 +31,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -40,6 +50,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cliptranslate.R
 import dev.cliptranslate.core.Languages
 import dev.cliptranslate.data.LOCAL_PROVIDER_ID
+import dev.cliptranslate.platform.PhotoInput
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
@@ -73,6 +84,33 @@ fun TranslateScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var showAllLanguages by rememberSaveable { mutableStateOf(false) }
+
+    // 拍照的输出 uri 要在两次回调之间留住：点「拍照」时建文件、启动相机，回来时才知道往哪读。
+    // 用 remember 而不是 rememberSaveable（Uri 需要自定义 Saver），进程被杀后重新拍一张即可。
+    var pendingPhotoUri by remember { mutableStateOf<Uri?>(null) }
+    val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val uri = pendingPhotoUri
+        pendingPhotoUri = null
+        if (success && uri != null) vm.setImage(uri)
+    }
+    // 系统照片选择器（Android 13+ 的照片选择器 / 旧版本由系统回落），只交出用户挑中的那一张，
+    // 因此不需要任何存储权限。
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) vm.setImage(uri)
+    }
+    val takePhoto: () -> Unit = {
+        val target = PhotoInput.createPhotoTarget(context)
+        if (target == null) {
+            Toast.makeText(
+                context,
+                context.getString(R.string.image_translate_camera_failed),
+                Toast.LENGTH_SHORT,
+            ).show()
+        } else {
+            pendingPhotoUri = target.second
+            takePicture.launch(target.second)
+        }
+    }
 
     // 首次进入页面：拉一次服务商配置，并自动使用剪贴板内容。
     LaunchedEffect(Unit) {
@@ -132,18 +170,67 @@ fun TranslateScreen(
                     .fillMaxWidth()
                     .heightIn(min = 120.dp),
                 minLines = 4,
-                label = "在此输入要翻译的文本；复制后切回本应用会自动填入",
+                label = if (state.image != null) {
+                    // 选了图之后输入框不再是正文，而是可选附加要求 —— placeholder 要跟着换，
+                    // 否则用户会以为图片没生效、还得把图里的文字打进来。
+                    stringResource(R.string.image_translate_input_hint)
+                } else {
+                    "在此输入要翻译的文本；复制后切回本应用会自动填入"
+                },
                 useLabelAsPlaceholder = true,
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(text = "粘贴", onClick = { vm.pasteFromClipboard(context) })
                 TextButton(text = "清空", onClick = vm::clearInput)
+                // 图片入口只在「本地模型 + 主文件与视觉投影都就绪」时出现：
+                // 缺附件时点了也没用，引导下载的责任在设置页的视觉投影行。
+                if (state.canImageTranslate) {
+                    TextButton(
+                        text = stringResource(R.string.image_translate_take_photo),
+                        onClick = takePhoto,
+                    )
+                    TextButton(
+                        text = stringResource(R.string.image_translate_pick),
+                        onClick = {
+                            pickImage.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                    )
+                }
+            }
+
+            // 已选图片：点缩略图移除。缩略图独立于输入框，避免用户以为「清空」会连带丢图。
+            state.imageThumbnail?.let { thumbnail ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Image(
+                        bitmap = thumbnail.asImageBitmap(),
+                        contentDescription = stringResource(R.string.image_translate_remove),
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { vm.clearImage() },
+                    )
+                    Text(
+                        text = stringResource(R.string.image_translate_selected),
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
             }
 
             Button(
                 onClick = vm::translate,
-                enabled = !state.isLoading && state.input.isNotBlank(),
+                // 图片模式下正文可以为空（输入框只放附加要求），只要选了图就能翻。
+                enabled = !state.isLoading && (state.input.isNotBlank() || state.image != null),
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 52.dp),

@@ -27,4 +27,22 @@
     <string name="local_model_delete_title">删除本地模型</string>
     <string name="local_model_delete_message">将删除已下载的模型文件（约 %1$s），需要时可以重新下载。</string>
     <string name="local_model_delete_confirm">删除</string>
+
+    <!-- 视觉投影附件（图片翻译） -->
+    <string name="local_model_mmproj_title">视觉投影（图片翻译）</string>
+    <string name="local_model_mmproj_desc">可选附件，下载后该模型就能翻译图片中的文本</string>
+    <string name="local_model_mmproj_download">下载视觉投影</string>
+    <string name="local_model_mmproj_resume">继续下载</string>
+    <string name="local_model_mmproj_cancel">取消</string>
+    <string name="local_model_mmproj_delete">删除视觉投影</string>
+    <string name="local_model_mmproj_delete_title">删除视觉投影</string>
+    <string name="local_model_mmproj_delete_message">将删除已下载的视觉投影（约 %1$s），删除后该模型不能翻译图片，需要时可以重新下载。</string>
+
+    <!-- 图片翻译 -->
+    <string name="image_translate_take_photo">拍照</string>
+    <string name="image_translate_pick">打开图片</string>
+    <string name="image_translate_remove">移除图片</string>
+    <string name="image_translate_selected">已选择图片，点缩略图可移除</string>
+    <string name="image_translate_input_hint">（可选）对本次翻译的附加要求，例如「保留原文分行」</string>
+    <string name="image_translate_camera_failed">无法创建照片文件，请检查存储空间</string>
 </resources>

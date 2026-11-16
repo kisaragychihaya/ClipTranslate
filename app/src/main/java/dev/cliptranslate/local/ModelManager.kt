@@ -44,7 +44,11 @@ sealed interface ModelState {
  * 下载先写同目录的 `.part` 临时文件，SHA256 校验通过后才 rename 成正式文件名；
  * 取消或失败都保留 `.part`，下次点「继续下载」用 Range 从断点续传（服务器实测支持 206）。
  *
- * 允许多个模型同时下载：每个 [Session] 有自己的 job 与 `.part`，互不影响。
+ * 一个模型可能有两份文件：主文件（[LocalModelSpec.fileName]）与可选的视觉投影附件
+ * （[LocalModelSpec.mmproj]）。两者共用同一套 [FileSlot] 逻辑 —— 各自一个 `.part`、各自的
+ * 状态流与下载 job，互不影响；删模型时连带删掉附件，避免留下几百 MB 的孤儿文件。
+ *
+ * 允许多个模型同时下载：每个 [FileSlot] 有自己的 job 与 `.part`，互不影响。
  * 全进程只有一个实例（[get]），设置页与翻译页共享同一份进度 StateFlow。
  */
 class ModelManager private constructor(context: Context) {
@@ -71,17 +75,31 @@ class ModelManager private constructor(context: Context) {
     // --- 公开 API（modelId 一律按目录归一化） --------------------------------
 
     /** 指定模型的下载/校验状态。 */
-    fun stateOf(modelId: String): StateFlow<ModelState> = sessionOf(modelId).state
+    fun stateOf(modelId: String): StateFlow<ModelState> = sessionOf(modelId).main.state
 
     /** 指定模型是否有可续传的 `.part` 残档 —— 决定按钮文案是「下载」还是「继续下载」。 */
-    fun hasPartialOf(modelId: String): StateFlow<Boolean> = sessionOf(modelId).hasPartial
+    fun hasPartialOf(modelId: String): StateFlow<Boolean> = sessionOf(modelId).main.hasPartial
 
     /** 正式模型文件；大小与对应 spec 的 [LocalModelSpec.sizeBytes] 一致且校验通过后才会存在。 */
-    fun modelFile(modelId: String): File = sessionOf(modelId).modelFile
+    fun modelFile(modelId: String): File = sessionOf(modelId).main.file
+
+    /**
+     * 视觉投影附件的状态；模型没有附件（[LocalModelSpec.mmproj] 为 null）时返回 null ——
+     * 调用点据此判断「这个模型有没有图片翻译这项能力」，比让 UI 自己查目录更直接。
+     */
+    fun attachmentStateOf(modelId: String): StateFlow<ModelState>? =
+        sessionOf(modelId).attachment?.state
+
+    /** 视觉投影附件文件；没有附件的模型返回 null。未下载时文件不存在。 */
+    fun attachmentFile(modelId: String): File? = sessionOf(modelId).attachment?.file
+
+    /** 附件是否有可续传的 `.part` 残档；没有附件的模型返回 null。 */
+    fun hasAttachmentPartialOf(modelId: String): StateFlow<Boolean>? =
+        sessionOf(modelId).attachment?.hasPartial
 
     /**
      * 按磁盘现状推断所有模型的状态：正式文件大小对上才算 Ready；大小不符的坏文件直接删掉，
-     * 退化为「未下载」。正在下载的模型不动，避免把 Downloading 覆盖掉。
+     * 退化为「未下载」。正在下载的模型不动，避免把 Downloading 覆盖掉。附件一并覆盖。
      */
     fun refreshFromDisk() {
         LocalModelCatalog.models.forEach { sessionOf(it.id).refreshFromDisk() }
@@ -89,17 +107,32 @@ class ModelManager private constructor(context: Context) {
 
     /** 开始（或继续）下载；该模型已经在下载中或已经就绪则忽略。失败/取消都保留 `.part` 供续传。 */
     fun download(modelId: String) {
-        sessionOf(modelId).download()
+        sessionOf(modelId).main.download()
     }
 
     /** 取消下载：保留 `.part`，下次「继续下载」从断点续传。 */
     fun cancelDownload(modelId: String) {
-        sessionOf(modelId).cancelDownload()
+        sessionOf(modelId).main.cancelDownload()
     }
 
-    /** 删除正式文件与 `.part` 残档，回到「未下载」。 */
+    /** 删除正式文件与 `.part` 残档（连带视觉投影附件），回到「未下载」。 */
     fun deleteModel(modelId: String) {
         sessionOf(modelId).deleteModel()
+    }
+
+    /** 开始（或继续）下载视觉投影附件；没有附件的模型与下载中的状态都直接忽略。 */
+    fun downloadAttachment(modelId: String) {
+        sessionOf(modelId).attachment?.download()
+    }
+
+    /** 取消附件下载：保留 `.part` 供续传。 */
+    fun cancelAttachmentDownload(modelId: String) {
+        sessionOf(modelId).attachment?.cancelDownload()
+    }
+
+    /** 只删除视觉投影附件（主文件保留）；没有附件的模型忽略。 */
+    fun deleteAttachment(modelId: String) {
+        sessionOf(modelId).attachment?.delete()
     }
 
     // --- 会话 ---------------------------------------------------------------
@@ -111,15 +144,66 @@ class ModelManager private constructor(context: Context) {
     }
 
     /**
-     * 单个模型的文件句柄、状态流与下载 job。
+     * 单个模型的两份文件槽（主文件 + 可选附件）。
      *
-     * 所有状态都通过 [publish] 写：既更新自己的 StateFlow，也同步刷新管理器的聚合副本，
-     * 保证 `stateOf(id)` 与 `statesMap()[id]` 永远看到同一个值。
+     * 主文件的状态既写进自己的 StateFlow，也同步刷新管理器的聚合副本（[publishState]）；
+     * 附件不进聚合表 —— [statesMap] 的语义一直是「这个模型的模型文件好没好」，
+     * 翻译页只依赖它判断能否翻译、能否加载。
      */
     private inner class Session(val spec: LocalModelSpec) {
 
-        val modelFile = File(modelsDir, spec.fileName)
-        private val partFile = File(modelsDir, "${spec.fileName}.part")
+        val main = FileSlot(
+            fileName = spec.fileName,
+            downloadUrl = spec.downloadUrl,
+            sha256 = spec.sha256,
+            sizeBytes = spec.sizeBytes,
+            onPublished = { publishState(spec.id, it) },
+        )
+
+        /** 附件槽；模型没有视觉投影时为 null。 */
+        val attachment: FileSlot? = spec.mmproj?.let { attachment ->
+            FileSlot(
+                fileName = attachment.fileName,
+                downloadUrl = attachment.downloadUrl,
+                sha256 = attachment.sha256,
+                sizeBytes = attachment.sizeBytes,
+                onPublished = { },
+            )
+        }
+
+        init {
+            // 会话一建出来就进聚合表，避免 statesMap 缺 key 被上层当成「未下载」。
+            publishState(spec.id, main.state.value)
+        }
+
+        fun refreshFromDisk() {
+            main.refreshFromDisk()
+            attachment?.refreshFromDisk()
+        }
+
+        fun deleteModel() {
+            main.delete()
+            attachment?.delete()
+        }
+    }
+
+    /**
+     * 一个受管的磁盘文件：正式文件 + `.part` 残档 + 状态流 + 下载 job。
+     *
+     * 主模型文件与视觉投影附件只是文件名/SHA256/大小不同，行为必须逐字一致，
+     * 所以两边共用这一个类；[onPublished] 让主文件把状态同步进聚合表，附件传空实现。
+     * 所有状态都通过 [publish] 写，保证 StateFlow 与聚合表永远看到同一个值。
+     */
+    private inner class FileSlot(
+        private val fileName: String,
+        private val downloadUrl: String,
+        private val sha256: String,
+        private val sizeBytes: Long,
+        private val onPublished: (ModelState) -> Unit,
+    ) {
+
+        val file = File(modelsDir, fileName)
+        private val partFile = File(modelsDir, "$fileName.part")
 
         private val _state = MutableStateFlow<ModelState>(ModelState.NotDownloaded)
         val state: StateFlow<ModelState> = _state.asStateFlow()
@@ -130,18 +214,13 @@ class ModelManager private constructor(context: Context) {
         @Volatile
         private var job: Job? = null
 
-        init {
-            // 会话一建出来就进聚合表，避免 statesMap 缺 key 被上层当成「未下载」。
-            publishState(spec.id, _state.value)
-        }
-
         fun refreshFromDisk() {
             if (job?.isActive == true) return
             when {
-                !modelFile.exists() -> publish(ModelState.NotDownloaded)
-                modelFile.length() == spec.sizeBytes -> publish(ModelState.Ready)
+                !file.exists() -> publish(ModelState.NotDownloaded)
+                file.length() == sizeBytes -> publish(ModelState.Ready)
                 else -> {
-                    modelFile.delete()
+                    file.delete()
                     publish(ModelState.NotDownloaded)
                 }
             }
@@ -169,31 +248,30 @@ class ModelManager private constructor(context: Context) {
             job?.cancel()
         }
 
-        fun deleteModel() {
+        fun delete() {
             job?.cancel()
             job = null
-            modelFile.delete()
+            file.delete()
             partFile.delete()
             publish(ModelState.NotDownloaded)
         }
 
         private suspend fun downloadInternal() {
             modelsDir.mkdirs()
-            val size = spec.sizeBytes
 
             var resumeFrom = if (partFile.exists()) partFile.length() else 0L
-            if (resumeFrom > size) {
+            if (resumeFrom > sizeBytes) {
                 // 残档比目标还大，肯定是坏的，从头来过。
                 partFile.delete()
                 resumeFrom = 0L
             }
-            if (resumeFrom == size) {
+            if (resumeFrom == sizeBytes) {
                 // 残档已经下载完整（上次校验前被打断），直接进校验。
                 verifyAndPromote()
                 return
             }
 
-            publish(ModelState.Downloading(resumeFrom, size))
+            publish(ModelState.Downloading(resumeFrom, sizeBytes))
 
             val connection = openConnection(resumeFrom)
             try {
@@ -220,15 +298,15 @@ class ModelManager private constructor(context: Context) {
                             // 每 256KB 刷新一次进度，避免每个 8KB 块都惊动 UI。
                             if (pendingBytes >= PROGRESS_STEP_BYTES) {
                                 pendingBytes = 0L
-                                publish(ModelState.Downloading(written, size))
+                                publish(ModelState.Downloading(written, sizeBytes))
                             }
                         }
                     }
                 }
 
-                publish(ModelState.Downloading(written, size))
-                if (written != size) {
-                    throw IOException("下载不完整：已写入 $written / $size 字节")
+                publish(ModelState.Downloading(written, sizeBytes))
+                if (written != sizeBytes) {
+                    throw IOException("下载不完整：已写入 $written / $sizeBytes 字节")
                 }
                 verifyAndPromote()
             } finally {
@@ -238,9 +316,9 @@ class ModelManager private constructor(context: Context) {
 
         private fun openConnection(resumeFrom: Long): HttpURLConnection {
             val url = try {
-                URL(spec.downloadUrl)
+                URL(downloadUrl)
             } catch (e: MalformedURLException) {
-                throw IOException("下载地址无效：${spec.downloadUrl}")
+                throw IOException("下载地址无效：$downloadUrl")
             }
             val connection = url.openConnection() as? HttpURLConnection
                 ?: throw IOException("只支持 http/https 下载地址")
@@ -263,14 +341,14 @@ class ModelManager private constructor(context: Context) {
         private fun verifyAndPromote() {
             publish(ModelState.Verifying)
             val actual = sha256Of(partFile)
-            if (!actual.equals(spec.sha256, ignoreCase = true)) {
+            if (!actual.equals(sha256, ignoreCase = true)) {
                 partFile.delete()
                 publish(ModelState.Error("校验失败"))
                 return
             }
-            if (modelFile.exists()) modelFile.delete()
-            if (!partFile.renameTo(modelFile)) {
-                partFile.copyTo(modelFile, overwrite = true)
+            if (file.exists()) file.delete()
+            if (!partFile.renameTo(file)) {
+                partFile.copyTo(file, overwrite = true)
                 partFile.delete()
             }
             publish(ModelState.Ready)
@@ -279,7 +357,7 @@ class ModelManager private constructor(context: Context) {
         fun publish(next: ModelState) {
             _state.value = next
             _hasPartial.value = partFile.exists() && partFile.length() > 0
-            publishState(spec.id, next)
+            onPublished(next)
         }
     }
 

@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +94,31 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             modelManager.hasPartialOf(selectedLocalModelId.value).value,
         )
 
+    /**
+     * 视觉投影附件（图片翻译）的状态，同样跟随选中的模型。
+     *
+     * 模型没有附件时是 null —— 卡片的附件行据此整行不出现，而不是显示一个永远「未下载」的行。
+     * 附件的状态流与主文件是两份，各自独立下载、各自续传。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val attachmentState: StateFlow<ModelState?> = selectedLocalModelId
+        .flatMapLatest { id -> modelManager.attachmentStateOf(id) ?: flowOf<ModelState?>(null) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            modelManager.attachmentStateOf(selectedLocalModelId.value)?.value,
+        )
+
+    /** 附件是否有 `.part` 残档 —— 决定附件按钮文案是「下载视觉投影」还是「继续下载」。 */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val hasPartialAttachment: StateFlow<Boolean> = selectedLocalModelId
+        .flatMapLatest { id -> modelManager.hasAttachmentPartialOf(id) ?: flowOf(false) }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            modelManager.hasAttachmentPartialOf(selectedLocalModelId.value)?.value ?: false,
+        )
+
     /** 「启用本地离线翻译」开关（持久化在 app_prefs，与翻译页共享）。 */
     val localEnabled: StateFlow<Boolean> = LocalSettings.enabled
 
@@ -148,6 +174,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun deleteModel() {
         modelManager.deleteModel(selectedLocalModelId.value)
+    }
+
+    // 附件（视觉投影）与主文件各自独立：下载/取消/删除都不影响另一份。
+
+    fun downloadAttachment() {
+        modelManager.downloadAttachment(selectedLocalModelId.value)
+    }
+
+    fun cancelAttachmentDownload() {
+        modelManager.cancelAttachmentDownload(selectedLocalModelId.value)
+    }
+
+    fun deleteAttachment() {
+        modelManager.deleteAttachment(selectedLocalModelId.value)
     }
 
     fun setLocalEnabled(enabled: Boolean) {

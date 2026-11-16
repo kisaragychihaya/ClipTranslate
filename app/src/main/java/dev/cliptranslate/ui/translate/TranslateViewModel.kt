@@ -2,6 +2,8 @@ package dev.cliptranslate.ui.translate
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.cliptranslate.core.Languages
@@ -10,6 +12,7 @@ import dev.cliptranslate.core.TextUtil
 import dev.cliptranslate.data.LOCAL_PROVIDER_ID
 import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
+import dev.cliptranslate.local.DecodedImage
 import dev.cliptranslate.local.LocalModelCatalog
 import dev.cliptranslate.local.LocalModelRequirements
 import dev.cliptranslate.local.LocalSettings
@@ -20,11 +23,13 @@ import dev.cliptranslate.local.ModelState
 import dev.cliptranslate.net.OpenAiClient
 import dev.cliptranslate.net.OpenAiException
 import dev.cliptranslate.platform.ClipboardHelper
+import dev.cliptranslate.platform.PhotoInput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -41,6 +46,15 @@ data class TranslateUiState(
     val providers: List<Provider> = emptyList(),
     /** 当前选中的本地模型是否已就绪（选中本地 Provider 但没下载时，主界面据此提示去设置下载）。 */
     val localModelReady: Boolean = false,
+    /**
+     * 能否翻译图片：本地 Provider + 选中模型带视觉投影附件 + 主文件与附件都已就绪。
+     * 只有它为 true 时「拍照 / 打开图片」才出现 —— 附件没下载时引导去设置页，不在主界面堆提示。
+     */
+    val canImageTranslate: Boolean = false,
+    /** 当前选中的图片（RGB 像素）；非 null 时 [TranslateViewModel.translate] 走图片推理。 */
+    val image: DecodedImage? = null,
+    /** 输入框下方的小缩略图，与 [image] 同时设置/清除。 */
+    val imageThumbnail: Bitmap? = null,
 ) {
     val currentProvider: Provider?
         get() = providers.firstOrNull { it.id == providerId }
@@ -78,11 +92,23 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             var lastReadyIds: Set<String>? = null
             modelManager.statesMap.collect { states ->
-                _state.update { current -> current.copy(localModelReady = isLocalModelReady(current)) }
+                refreshLocalReadiness()
                 val readyIds = states.filterValues { it is ModelState.Ready }.keys.toSet()
                 if (readyIds != lastReadyIds) {
                     lastReadyIds = readyIds
                     refreshProviders()
+                }
+            }
+        }
+        // 视觉投影附件不在 statesMap 里（聚合表只表达「模型文件好没好」），所以单独跟着选中的
+        // 本地模型切流：附件下载完成 / 被删除时，图片入口要立刻跟着出现或消失。
+        viewModelScope.launch {
+            LocalSettings.selectedModelId.collectLatest { selectedId ->
+                val attachment = modelManager.attachmentStateOf(selectedId)
+                if (attachment == null) {
+                    refreshImageTranslation()
+                } else {
+                    attachment.collect { refreshImageTranslation() }
                 }
             }
         }
@@ -164,6 +190,37 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(input = text, output = "", error = null) }
     }
 
+    // --- 图片输入 -----------------------------------------------------------
+
+    /**
+     * 选好图后解码：BitmapFactory 两遍降采样 + RGB 摊平都在 [Dispatchers.IO]，
+     * 一张大图要几十毫秒到几百毫秒，放主线程会卡住输入框。
+     *
+     * 解码失败只清掉旧图并给可读提示，不动已有译文 —— 用户可能只是想换一张图。
+     */
+    fun setImage(uri: Uri) {
+        viewModelScope.launch {
+            val photo = withContext(Dispatchers.IO) { PhotoInput.decode(app, uri) }
+            if (photo == null) {
+                _state.update { it.copy(error = "图片读取失败，请换一张试试") }
+                return@launch
+            }
+            _state.update {
+                it.copy(
+                    image = photo.image,
+                    imageThumbnail = photo.thumbnail,
+                    output = "",
+                    error = null,
+                )
+            }
+        }
+    }
+
+    /** 点缩略图移除已选图片，回到纯文本翻译。 */
+    fun clearImage() {
+        _state.update { it.copy(image = null, imageThumbnail = null, output = "", error = null) }
+    }
+
     // --- 服务商 / 模型 ------------------------------------------------------
 
     fun refreshProviders() {
@@ -199,6 +256,7 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             }
             _state.update { it.copy(localModelReady = isLocalModelReady(it)) }
+            refreshImageTranslation()
             persistSelection()
         }
     }
@@ -209,8 +267,10 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         val snapshot = _state.value
         if (snapshot.isLoading) return
 
+        val image = snapshot.image
         val text = TextUtil.clipForRequest(snapshot.input)
-        if (text.isBlank()) {
+        // 图片模式下输入框里写的是「附加要求」，可以为空；纯文本模式仍然必须有正文。
+        if (image == null && text.isBlank()) {
             _state.update { it.copy(error = "请输入要翻译的文本") }
             return
         }
@@ -234,6 +294,14 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.update { it.copy(error = "请先在设置中下载本地模型") }
                 return
             }
+            // 图片入口只在附件就绪时出现，这里再拦一次：入口出现后用户可能去设置里把附件删了。
+            if (image != null &&
+                (localSpec.mmproj == null ||
+                    modelManager.attachmentStateOf(localSpec.id)?.value !is ModelState.Ready)
+            ) {
+                _state.update { it.copy(error = "图片翻译需要先在设置中下载视觉投影") }
+                return
+            }
         } else if (model.isBlank()) {
             _state.update { it.copy(error = "请先在设置中选择模型") }
             return
@@ -244,7 +312,7 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val result = withContext(Dispatchers.IO) {
                     if (isLocal) {
-                        LocalTranslator.get(app).translate(text, targetCode, localSpec.id)
+                        LocalTranslator.get(app).translate(text, targetCode, localSpec.id, image)
                     } else {
                         OpenAiClient(provider.baseUrl, provider.apiKey).chat(
                             model,
@@ -299,6 +367,32 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
     /** 选择（服务商/模型）变了就重算一次就绪标记 —— 这类变化不会让 statesMap 推送。 */
     private fun refreshLocalReadiness() {
         _state.update { it.copy(localModelReady = isLocalModelReady(it)) }
+        refreshImageTranslation()
+    }
+
+    /**
+     * 重算「能否翻译图片」：本地 Provider + 选中模型带视觉投影附件 + 主文件与附件都已就绪。
+     *
+     * 能力不成立时顺手清掉已选图片：否则用户在图片翻译可用时选好图、再把模型换成不支持图片的，
+     * 点「翻译」只会静默丢掉图片，比直接收起图片更让人困惑。
+     */
+    private fun refreshImageTranslation() {
+        _state.update { current ->
+            if (canImageTranslate(current)) {
+                current.copy(canImageTranslate = true)
+            } else {
+                current.copy(canImageTranslate = false, image = null, imageThumbnail = null)
+            }
+        }
+    }
+
+    private fun canImageTranslate(snapshot: TranslateUiState): Boolean {
+        if (snapshot.currentProvider?.id != LOCAL_PROVIDER_ID) return false
+        val spec = LocalModelCatalog.byId(snapshot.effectiveModelId)
+        // 没有附件的模型（如 TranslateGemma）就没有视觉能力，连按钮都不出现。
+        if (spec.mmproj == null) return false
+        if (modelManager.statesMap.value[spec.id] !is ModelState.Ready) return false
+        return modelManager.attachmentStateOf(spec.id)?.value is ModelState.Ready
     }
 
     // --- 记忆项 -------------------------------------------------------------

@@ -13,6 +13,20 @@ enum class LocalModelPromptStyle {
 }
 
 /**
+ * 模型的可选附件（目前只有 Index-Translate 2B 的视觉投影 mmproj）。
+ *
+ * 附件不是模型本体的一部分：主文件照样能跑纯文本翻译，下载附件只是给这个模型解锁
+ * 「翻译图片里的文本」这一种额外能力。三要素与 [LocalModelSpec] 同义（大小判完整、
+ * SHA256 判内容），下载/校验/续传/删除完全复用 [ModelManager] 同一套逻辑。
+ */
+data class AttachmentSpec(
+    val fileName: String,
+    val downloadUrl: String,
+    val sha256: String,
+    val sizeBytes: Long,
+)
+
+/**
  * 一个可下载的本地 GGUF 模型。
  *
  * 下载所需的三要素（[downloadUrl]、[sha256]、[sizeBytes]）必须与远端文件严格一致：
@@ -20,6 +34,9 @@ enum class LocalModelPromptStyle {
  *
  * [minTotalMemBytes] 是机型门槛（总内存），[defaultMemoryThresholdGb] 是加载前的可用内存预检默认值，
  * 两者刻意分开：小模型的机型门槛可以低到 4GiB，而加载时仍需要留出余量给系统和其余应用。
+ *
+ * [mmproj] 非空表示这个模型带一个可选的视觉投影附件 —— 下载后该模型解锁图片翻译，
+ * 不下载则只有纯文本能力（见 [LocalTranslator]）。
  */
 data class LocalModelSpec(
     val id: String,
@@ -31,6 +48,7 @@ data class LocalModelSpec(
     val minTotalMemBytes: Long,
     val defaultMemoryThresholdGb: Float,
     val promptStyle: LocalModelPromptStyle,
+    val mmproj: AttachmentSpec? = null,
 )
 
 /**
@@ -73,6 +91,15 @@ object LocalModelCatalog {
             minTotalMemBytes = 4L * GIB,
             defaultMemoryThresholdGb = 2.0f,
             promptStyle = LocalModelPromptStyle.INDEX_TRANSLATE,
+            // Q8_0 量化的视觉投影（约 345MB）：主模型本身不带网关，必须随 mmproj 一起加载
+            // 才能把图片编码成模型看得懂的向量。它是可选项，纯文本翻译不需要它。
+            mmproj = AttachmentSpec(
+                fileName = "Index-Translate-2B.mmproj-Q8_0.gguf",
+                downloadUrl = "https://www.modelscope.cn/models/IndexTeam/Index-Translate-2B-GGUF/" +
+                    "resolve/master/Index-Translate-2B.mmproj-Q8_0.gguf",
+                sha256 = "b100ca29aaf437461d0b22ada7492d5d2dfeaa15959e329c4267598ddebe446d",
+                sizeBytes = 361518144L,
+            ),
         ),
     )
 

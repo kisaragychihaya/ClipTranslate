@@ -40,6 +40,20 @@
             </intent-filter>
         </activity>
 
+        <!-- 图片翻译的拍照链路：相机应用只能通过 content:// 写文件，所以用 FileProvider
+             把 cacheDir/images/ 暴露出去（见 res/xml/file_paths.xml）。
+             exported=false + grantUriPermissions=true：只给当次被拉起的外部应用临时读写权限，
+             不需要任何存储权限，也不会把缓存目录整体暴露给别的应用。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 
 </manifest>

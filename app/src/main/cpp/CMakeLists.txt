@@ -64,7 +64,20 @@ set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_APP      OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_MTMD     OFF CACHE BOOL "" FORCE)
+# mtmd 是 llama.cpp 的多模态库（mtmd.h / mtmd-helper.h），Index-Translate 2B 的
+# 图片翻译走它。b12375 里这个 option 的含义是「tools 树不建时单独建 libmtmd」：
+# 根 CMakeLists 的条件是 LLAMA_BUILD_MTMD AND NOT (LLAMA_BUILD_COMMON AND
+# LLAMA_BUILD_TOOLS)，我们正好两项都 OFF，所以只会 add_subdirectory 一次，不会
+# 和 tools/ 里的那一份重复。
+# 它不会把 common 拖进来（common 才带 httplib/OpenSSL）：mtmd 的依赖只有
+#   PUBLIC  ggml llama Threads::Threads
+#   PRIVATE vendor::{hash,miniaudio,stb,sheredom}
+# 后三个是 header-only 的 INTERFACE target，hash 是 xxhash/sha1/sha256 的小静态库，
+# vendor/CMakeLists.txt 里无条件 add_subdirectory，不受 LLAMA_BUILD_COMMON 影响。
+# MTMD_VIDEO 需要的 sheredom/subprocess 在 LLAMA_SUBPROCESS=OFF 时会被 mtmd 自己的
+# CMakeLists 强制关掉（见下面的 LLAMA_SUBPROCESS），所以不会给 Android 链进
+# ffmpeg/进程相关的代码。
+set(LLAMA_BUILD_MTMD     ON  CACHE BOOL "" FORCE)
 set(LLAMA_OPENSSL        OFF CACHE BOOL "" FORCE)  # OpenSSL 不在 NDK 稳定 API 里
 set(LLAMA_SUBPROCESS     OFF CACHE BOOL "" FORCE)  # 移动端不支持 fork/exec
 # LLAMA_CURL 在这个 tag 里已经废弃（llama_option_depr），不用再传。
@@ -227,6 +240,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(llama_cpp)
 
+# FetchContent 会跟着上游一起演进：上游要是把 LLAMA_BUILD_MTMD 改名/删掉，mtmd 目标
+# 就静默不存在，直到链接期才报一堆未定义符号。这里提前红掉，错误信息直接指到原因。
+if(NOT TARGET mtmd)
+    message(FATAL_ERROR
+            "llama.cpp ${LLAMA_CPP_TAG} 里没有 mtmd 目标：LLAMA_BUILD_MTMD 的语义变了，"
+            "需要按新的头文件/CMake 结构重核 app/src/main/cpp/CMakeLists.txt")
+endif()
+
 # ---------------------------------------------------------------------------
 # JNI 库
 # ---------------------------------------------------------------------------
@@ -237,13 +258,18 @@ target_compile_options(cliptranslate_jni PRIVATE -O3 -fPIC)
 
 target_include_directories(cliptranslate_jni PRIVATE
         ${llama_cpp_SOURCE_DIR}/include
-        ${llama_cpp_SOURCE_DIR}/ggml/include)
+        ${llama_cpp_SOURCE_DIR}/ggml/include
+        # mtmd.h / mtmd-helper.h；mtmd 自己也把这一层作为 PUBLIC 头目录，这里写出来是
+        # 为了让 cliptranslate_jni.cpp 的 #include 不依赖链接顺序。
+        ${llama_cpp_SOURCE_DIR}/tools/mtmd)
 
 # llama 是静态库，PUBLIC 依赖会带上 ggml / ggml-base / ggml-cpu / ggml-opencl /
 # Threads（ggml_add_backend_library 对静态 backend 用的是 PUBLIC 链接，
 # 所以这里不用单独再链一遍 backend 库），ggml-base 自己会在 Android 上补 dl 和 m。
 # log 是 NDK 的 liblog（__android_log_*）。
-target_link_libraries(cliptranslate_jni PRIVATE llama android log)
+# mtmd 同样是静态库：它的 PUBLIC（ggml llama Threads）和 PRIVATE（vendor::hash 等）
+# 依赖 CMake 都会带进最终链接，不需要在这里重复列。
+target_link_libraries(cliptranslate_jni PRIVATE llama mtmd android log)
 
 # Android 15 起部分设备是 16KB 内存页，未对齐 16KB 的 .so 直接加载失败
 # （NDK r28 才默认打开这个开关，r27 要显式给）。加上它只是让 ELF 段对齐变大，

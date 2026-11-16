@@ -25,6 +25,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cliptranslate.R
 import dev.cliptranslate.data.Provider
+import dev.cliptranslate.local.AttachmentSpec
 import dev.cliptranslate.local.DevSettings
 import dev.cliptranslate.local.GpuBackend
 import dev.cliptranslate.local.LlamaBridge
@@ -69,6 +70,8 @@ fun SettingsScreen(
     val fetchResult by vm.fetchResult.collectAsStateWithLifecycle()
     val modelState by vm.modelState.collectAsStateWithLifecycle()
     val hasPartialModel by vm.hasPartialModel.collectAsStateWithLifecycle()
+    val attachmentState by vm.attachmentState.collectAsStateWithLifecycle()
+    val hasPartialAttachment by vm.hasPartialAttachment.collectAsStateWithLifecycle()
     val selectedLocalModelId by vm.selectedLocalModelId.collectAsStateWithLifecycle()
     val localModels = vm.localModels
     // 选中模型的大小/名称直接取目录：卡片进度行与删除确认弹窗共用同一份，不会各算一套。
@@ -87,6 +90,7 @@ fun SettingsScreen(
 
     var pendingDelete by remember { mutableStateOf<Provider?>(null) }
     var pendingModelDelete by remember { mutableStateOf(false) }
+    var pendingAttachmentDelete by remember { mutableStateOf(false) }
 
     // 回到设置页时对一遍磁盘：下载中途进程被杀也能恢复到「未下载」而不是卡在「下载中」。
     LaunchedEffect(Unit) {
@@ -134,9 +138,14 @@ fun SettingsScreen(
                         gpuBackend = gpuBackend,
                         backendSwitching = backendSwitching,
                         backendSwitchError = backendSwitchError,
+                        attachmentState = attachmentState,
+                        hasPartialAttachment = hasPartialAttachment,
                         onDownload = { vm.downloadModel() },
                         onCancel = { vm.cancelModelDownload() },
                         onDelete = { pendingModelDelete = true },
+                        onDownloadAttachment = { vm.downloadAttachment() },
+                        onCancelAttachment = { vm.cancelAttachmentDownload() },
+                        onDeleteAttachment = { pendingAttachmentDelete = true },
                         onToggleEnabled = { vm.setLocalEnabled(it) },
                         onSelectGpuBackend = { vm.setGpuBackend(it) },
                     )
@@ -265,6 +274,41 @@ fun SettingsScreen(
             }
         }
 
+        val attachment = selectedLocalModel.mmproj
+        if (pendingAttachmentDelete && attachment != null) {
+            SuperDialog(
+                show = true,
+                title = stringResource(R.string.local_model_mmproj_delete_title),
+                summary = stringResource(
+                    R.string.local_model_mmproj_delete_message,
+                    formatBytes(attachment.sizeBytes),
+                ),
+                onDismissRequest = { pendingAttachmentDelete = false },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        text = stringResource(R.string.local_model_cancel),
+                        onClick = { pendingAttachmentDelete = false },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        onClick = {
+                            vm.deleteAttachment()
+                            pendingAttachmentDelete = false
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                    ) {
+                        Text(stringResource(R.string.local_model_delete_confirm))
+                    }
+                }
+            }
+        }
+
         val editor = editing
         val fetched = fetchResult
         if (editor != null && fetched != null) {
@@ -308,9 +352,14 @@ private fun LocalModelCard(
     gpuBackend: GpuBackend,
     backendSwitching: Boolean,
     backendSwitchError: String?,
+    attachmentState: ModelState?,
+    hasPartialAttachment: Boolean,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
+    onDownloadAttachment: () -> Unit,
+    onCancelAttachment: () -> Unit,
+    onDeleteAttachment: () -> Unit,
     onToggleEnabled: (Boolean) -> Unit,
     onSelectGpuBackend: (GpuBackend) -> Unit,
 ) {
@@ -385,6 +434,20 @@ private fun LocalModelCard(
                         )
                     }
                 }
+            }
+
+            // 视觉投影是可选附件：主文件与它各自下载、各自续传，附件就绪后该模型才能翻译图片。
+            // 没有附件的模型（如 TranslateGemma）整行都不出现。
+            spec.mmproj?.let { attachment ->
+                HorizontalDivider()
+                AttachmentSection(
+                    attachment = attachment,
+                    state = attachmentState ?: ModelState.NotDownloaded,
+                    hasPartial = hasPartialAttachment,
+                    onDownload = onDownloadAttachment,
+                    onCancel = onCancelAttachment,
+                    onDelete = onDeleteAttachment,
+                )
             }
 
             SuperSwitch(
@@ -515,6 +578,74 @@ private fun LocalModelStatus(state: ModelState, sizeBytes: Long) {
                 style = MiuixTheme.textStyles.body2,
                 color = MiuixTheme.colorScheme.error,
             )
+        }
+    }
+}
+
+/**
+ * 视觉投影（图片翻译）附件行：标题 + 说明 + 状态 + 下载/取消/删除按钮。
+ *
+ * 交互刻意与主文件那一行完全一致（同一套 [ModelState] 分支、同一套按钮文案风格），
+ * 只有文案里点明这是「视觉投影」，避免用户把它当成第二个模型。
+ */
+@Composable
+private fun AttachmentSection(
+    attachment: AttachmentSpec,
+    state: ModelState,
+    hasPartial: Boolean,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = stringResource(R.string.local_model_mmproj_title),
+            style = MiuixTheme.textStyles.body1,
+        )
+        Text(
+            text = stringResource(R.string.local_model_mmproj_desc),
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+        LocalModelStatus(state = state, sizeBytes = attachment.sizeBytes)
+        // 校验中同样不给按钮：SHA256 打断不了，给了也是摆设。
+        when (state) {
+            is ModelState.Downloading -> {
+                Button(
+                    onClick = onCancel,
+                    colors = ButtonDefaults.buttonColors(),
+                ) {
+                    Text(stringResource(R.string.local_model_mmproj_cancel))
+                }
+            }
+
+            is ModelState.Ready -> {
+                Button(
+                    onClick = onDelete,
+                    colors = ButtonDefaults.buttonColors(),
+                ) {
+                    Text(stringResource(R.string.local_model_mmproj_delete))
+                }
+            }
+
+            is ModelState.Verifying -> Unit
+
+            else -> {
+                Button(
+                    onClick = onDownload,
+                    colors = ButtonDefaults.buttonColorsPrimary(),
+                ) {
+                    Text(
+                        stringResource(
+                            if (hasPartial) {
+                                R.string.local_model_mmproj_resume
+                            } else {
+                                R.string.local_model_mmproj_download
+                            },
+                        ),
+                    )
+                }
+            }
         }
     }
 }
