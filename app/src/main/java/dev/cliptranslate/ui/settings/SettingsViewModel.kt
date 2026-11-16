@@ -8,7 +8,6 @@ import dev.cliptranslate.data.Provider
 import dev.cliptranslate.data.ProviderRepository
 import dev.cliptranslate.data.isBuiltin
 import dev.cliptranslate.local.GpuBackend
-import dev.cliptranslate.local.LocalModelCatalog
 import dev.cliptranslate.local.LocalModelRequirements
 import dev.cliptranslate.local.LocalModelSpec
 import dev.cliptranslate.local.LocalSettings
@@ -51,14 +50,23 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     /**
      * 本机能跑的本地模型（目录顺序）。构造时算一次即可：设备总内存不会变。
      * 只有「一个模型都跑不动」时才会是空列表，此时设置页整张本地模型卡片都不显示。
+     *
+     * 顺手在这里 attach [LocalSettings]：后面的 [modelState] 等派生流在构造期就要读
+     * `selectedModelId` 建初值，晚到 `init` 里再 attach 会让初值停在目录默认模型上，
+     * UI 第一帧可能闪一下另一个模型的状态。
      */
-    val localModels: List<LocalModelSpec> = LocalModelRequirements.supportedModels(application)
+    val localModels: List<LocalModelSpec> = run {
+        LocalSettings.attach(application)
+        LocalModelRequirements.supportedModels(application)
+    }
 
-    /** 卡片里当前选中的本地模型；下载/删除/状态行都跟着它走。 */
-    private val _selectedLocalModelId = MutableStateFlow(
-        localModels.firstOrNull()?.id ?: LocalModelCatalog.DEFAULT_MODEL_ID,
-    )
-    val selectedLocalModelId: StateFlow<String> = _selectedLocalModelId.asStateFlow()
+    /**
+     * 卡片里当前选中的本地模型 —— 直接代理 [LocalSettings.selectedModelId]。
+     *
+     * 设置页与翻译页共用这一个持久化源，任一处改另一处立即跟着变；
+     * 这里不再另存一份，避免两个页面各记一个值后对不上。
+     */
+    val selectedLocalModelId: StateFlow<String> = LocalSettings.selectedModelId
 
     /**
      * 下载/校验状态跟随选中的模型。
@@ -67,22 +75,22 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
      * 新模型的进度，否则会残留上一个模型的「已就绪」，用户会以为新模型也下载好了。
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val modelState: StateFlow<ModelState> = _selectedLocalModelId
+    val modelState: StateFlow<ModelState> = selectedLocalModelId
         .flatMapLatest { modelManager.stateOf(it) }
         .stateIn(
             viewModelScope,
             SharingStarted.Eagerly,
-            modelManager.stateOf(_selectedLocalModelId.value).value,
+            modelManager.stateOf(selectedLocalModelId.value).value,
         )
 
     /** 是否有 `.part` 残档 —— 按钮文案在「下载」和「继续下载」之间切换。 */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val hasPartialModel: StateFlow<Boolean> = _selectedLocalModelId
+    val hasPartialModel: StateFlow<Boolean> = selectedLocalModelId
         .flatMapLatest { modelManager.hasPartialOf(it) }
         .stateIn(
             viewModelScope,
             SharingStarted.Eagerly,
-            modelManager.hasPartialOf(_selectedLocalModelId.value).value,
+            modelManager.hasPartialOf(selectedLocalModelId.value).value,
         )
 
     /** 「启用本地离线翻译」开关（持久化在 app_prefs，与翻译页共享）。 */
@@ -114,7 +122,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val editing: StateFlow<Provider?> = _editing.asStateFlow()
 
     init {
-        LocalSettings.attach(application)
+        // LocalSettings 已在 [localModels] 的初始化里 attach 过，这里只加载 Provider 列表。
         reload()
     }
 
@@ -125,21 +133,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     // --- 本地模型 -----------------------------------------------------------
 
-    /** 切换卡片里选中的本地模型；未收录的 id 退回目录默认，避免状态流指向不存在的会话。 */
+    /** 切换卡片里选中的本地模型；写进 [LocalSettings]，翻译页会同步收到。 */
     fun selectLocalModel(id: String) {
-        _selectedLocalModelId.value = LocalModelCatalog.byId(id).id
+        LocalSettings.setSelectedModelId(app, id)
     }
 
     fun downloadModel() {
-        modelManager.download(_selectedLocalModelId.value)
+        modelManager.download(selectedLocalModelId.value)
     }
 
     fun cancelModelDownload() {
-        modelManager.cancelDownload(_selectedLocalModelId.value)
+        modelManager.cancelDownload(selectedLocalModelId.value)
     }
 
     fun deleteModel() {
-        modelManager.deleteModel(_selectedLocalModelId.value)
+        modelManager.deleteModel(selectedLocalModelId.value)
     }
 
     fun setLocalEnabled(enabled: Boolean) {

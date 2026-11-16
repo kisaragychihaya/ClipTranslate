@@ -119,6 +119,13 @@ object LocalModelRequirements {
     fun supportedModels(context: Context): List<LocalModelSpec>
 }
 
+object LocalSettings {
+    val enabled: StateFlow<Boolean>
+    val gpuBackend: StateFlow<GpuBackend>
+    val selectedModelId: StateFlow<String>                       // 两个页面共享的"当前用哪个本地模型"
+    fun setSelectedModelId(context: Context, id: String)         // 归一化后写盘 + 推 StateFlow
+}
+
 class LocalTranslator {
     suspend fun translate(text: String, targetCode: String, modelId: String): String
 }
@@ -126,6 +133,8 @@ class LocalTranslator {
 - 加模型只改 `LocalModelCatalog`：下载、校验、机型过滤、设置页下拉、提示词分派全按目录走，不再有散落的硬编码常量。
 - native 侧只做裸 prompt 补全，chat template 由 Kotlin 侧展开（`GEMMA` / `INDEX_TRANSLATE` 两套，必须逐字一致）。
 - 内存判定分两层：`minTotalMemBytes` 决定机型能否列出该模型，`defaultMemoryThresholdGb` 决定加载前的可用内存预检阈值（用户自定义过阈值时以用户值为准）。
+- 「用哪个本地模型」只有 `LocalSettings.selectedModelId` 一个事实源：设置页下拉与翻译页服务商默认模型都读它，任一处改另一处立即跟着变。
+- 内置本地 Provider 的 `models` 只列「本机跑得动 且 `ModelState.Ready`」的模型（`ProviderRepository.builtinProviders`）；一个都没就绪时列表为空、`defaultModelId` 为 null，翻译页表现为下拉禁用 + 未选择模型 + 去设置下载提示。
 
 ### net（package `dev.cliptranslate.net`）
 ```kotlin
@@ -157,7 +166,7 @@ object ClipboardHelper {
 - 记忆项（`SharedPreferences` 单独文件 `app_prefs`）：最近使用的 providerId、modelId、targetCode。
 - 无已配置 Provider 时翻译页显示"去设置添加"引导按钮。
 - **设置页**：Provider 列表（名称、baseUrl、模型数）；「+」新建 / 点击编辑（底部弹窗编辑 name/baseUrl/apiKey）;「拉取模型」按钮 → `fetchModels()` → 弹出模型多选列表 → 确认后一键合并保存到该 Provider。
-- **本地模型**：设置页卡片顶部可选模型（只列本机内存跑得动的），每个模型独立下载/删除、各自 `.part` 可断点续传；「启用本地离线翻译」开关与「加速方式」是全局设置。翻译页的「本地模型未就绪」提示只看当前选中的那个模型。
+- **本地模型**：设置页卡片顶部可选模型（列出本机内存跑得动的全部模型，不管有没有下载），每个模型独立下载/删除、各自 `.part` 可断点续传；「启用本地离线翻译」开关与「加速方式」是全局设置。翻译页的本地 Provider 只列「跑得动且已下载就绪」的模型，两处的"当前选中模型"都来自 `LocalSettings.selectedModelId`，任一处切换另一处立即同步。
 - 线程纪律：所有 `OpenAiClient` 调用在 `Dispatchers.IO`；StateFlow 暴露状态。
 
 ## 4. CI（GitHub Actions）

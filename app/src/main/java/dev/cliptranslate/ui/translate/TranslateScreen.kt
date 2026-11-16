@@ -301,7 +301,9 @@ private fun ProviderSection(
                 provider.models.getOrNull(index)?.id?.let(onSelectModel)
             },
         )
-        if (provider.models.isEmpty()) {
+        // 本地 Provider 的空列表另有含义（还没下载任何一个模型），由下面的 localModelReady 提示覆盖，
+        // 这里只针对在线 Provider 还没拉取过模型的情况。
+        if (provider.models.isEmpty() && provider.id != LOCAL_PROVIDER_ID) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "该服务商还没有模型",

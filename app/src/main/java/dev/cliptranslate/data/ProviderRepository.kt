@@ -2,8 +2,10 @@ package dev.cliptranslate.data
 
 import android.content.Context
 import dev.cliptranslate.R
-import dev.cliptranslate.local.LocalModelCatalog
 import dev.cliptranslate.local.LocalModelRequirements
+import dev.cliptranslate.local.LocalSettings
+import dev.cliptranslate.local.ModelManager
+import dev.cliptranslate.local.ModelState
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -52,11 +54,16 @@ class ProviderRepository(context: Context) {
 
     // --- 内置 Provider -------------------------------------------------------
     // 本地 GGUF 推理，没有 baseUrl / apiKey；名称取自 strings.xml，UI 与数据层共用一份文案。
-    // models 只列本机内存跑得动的模型（内存不足的机型不显示 4B），defaultModelId 取第一个。
+    // models 只列「本机内存跑得动且已下载就绪」的模型：未下载的模型出现在翻译页下拉里只会让用户
+    // 选了才发现跑不起来，反而要回设置页；一个都没就绪时列表为空，翻译页据此提示去设置下载。
     private fun builtinProviders(): List<Provider> {
-        val runnable = LocalModelRequirements.supportedModels(appContext)
-            .ifEmpty { LocalModelCatalog.models.take(1) }
-        val models = runnable.map { ModelInfo(it.id) }
+        LocalSettings.attach(appContext)
+        val ready = LocalModelRequirements.supportedModels(appContext)
+            .filter { ModelManager.get(appContext).statesMap.value[it.id] is ModelState.Ready }
+        val models = ready.map { ModelInfo(it.id) }
+        // 默认模型跟着设置页的选择走；选的那个没就绪（或没选）时用第一个就绪的。
+        val selected = LocalSettings.selectedModelId.value
+        val defaultId = ready.firstOrNull { it.id == selected }?.id ?: ready.firstOrNull()?.id
         return listOf(
             Provider(
                 id = LOCAL_PROVIDER_ID,
@@ -64,7 +71,7 @@ class ProviderRepository(context: Context) {
                 baseUrl = "",
                 apiKey = "",
                 models = models,
-                defaultModelId = models.first().id,
+                defaultModelId = defaultId,
             ),
         )
     }

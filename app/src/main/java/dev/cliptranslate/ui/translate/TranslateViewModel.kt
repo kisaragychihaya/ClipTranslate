@@ -73,10 +73,30 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
         }
         refreshProviders()
 
-        // 任一模型下载完成 / 被删除 / 换了所选模型后，主界面的「本地模型未下载」提示要跟着变。
+        // 模型就绪状态变了：既要更新提示，也要重建服务商列表 —— 翻译页只列「已下载就绪」的本地模型。
+        // 只在「就绪集合」真的变化时刷新：下载进度每 256KB 推一次 statesMap，逐次重建会白白刷 UI。
         viewModelScope.launch {
-            modelManager.statesMap.collect {
+            var lastReadyIds: Set<String>? = null
+            modelManager.statesMap.collect { states ->
                 _state.update { current -> current.copy(localModelReady = isLocalModelReady(current)) }
+                val readyIds = states.filterValues { it is ModelState.Ready }.keys.toSet()
+                if (readyIds != lastReadyIds) {
+                    lastReadyIds = readyIds
+                    refreshProviders()
+                }
+            }
+        }
+        // 设置页换选本地模型后同步到翻译页（反向由 selectModel 写 LocalSettings 完成）。
+        // 刻意不检查「该模型是否已在 provider.models 里」：用户可能就是刚选了一个还没下载的模型，
+        // 这时翻译页如实显示它（配「还没下载」提示），下载完成后 refreshProviders 会把列表补上。
+        viewModelScope.launch {
+            LocalSettings.selectedModelId.drop(1).collect { selectedId ->
+                val current = _state.value
+                if (current.currentProvider?.id != LOCAL_PROVIDER_ID) return@collect
+                if (current.modelId == selectedId) return@collect
+                _state.update { it.copy(modelId = selectedId, output = "", error = null) }
+                refreshLocalReadiness()
+                persistSelection()
             }
         }
         // 设置页切换「启用本地离线翻译」后，服务商列表要重新过滤（首次值由 refreshProviders 处理）。
@@ -111,6 +131,11 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun selectModel(modelId: String) {
         _state.update { it.copy(modelId = modelId, output = "", error = null) }
+        // 本地 Provider 的模型选择与设置页共用 [LocalSettings] 这一个持久化源，这里顺手写回去，
+        // 设置页的下拉与下载状态会立即跟着切到这个模型。
+        if (_state.value.currentProvider?.id == LOCAL_PROVIDER_ID) {
+            LocalSettings.setSelectedModelId(app, modelId)
+        }
         // 换模型可能从「已下载」切到「还没下载」，提示要立刻跟着变（statesMap 不会因此推送）。
         refreshLocalReadiness()
         persistSelection()
@@ -153,10 +178,16 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
             _state.update { current ->
                 val provider = providers.firstOrNull { it.id == current.providerId }
                     ?: providers.firstOrNull()
+                // 本地 Provider 的 models 是「跑得动且已下载」的白名单：空列表意味着什么都不该选中，
+                // 再保留旧 modelId 会让下拉显示一个根本不在列表里的模型。在线 Provider 的 models
+                // 可能还没拉取过，保留旧 modelId 更友好。
                 val keepModel = provider != null &&
                     provider.id == current.providerId &&
                     !current.modelId.isNullOrBlank() &&
-                    (provider.models.isEmpty() || provider.models.any { it.id == current.modelId })
+                    (
+                        provider.models.any { it.id == current.modelId } ||
+                            (provider.models.isEmpty() && provider.id != LOCAL_PROVIDER_ID)
+                        )
                 val model = when {
                     provider == null -> null
                     keepModel -> current.modelId
