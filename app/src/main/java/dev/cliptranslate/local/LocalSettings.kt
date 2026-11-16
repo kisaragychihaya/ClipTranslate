@@ -23,6 +23,9 @@ object LocalSettings {
     private const val KEY_GPU_BACKEND = "gpu_backend"
     private const val KEY_LOCAL_MODEL_ID = "local_selected_model_id"
 
+    /** TranslateViewModel 的记忆项 key（同一个 prefs 文件），仅用于一次性迁移播种，见 [attach]。 */
+    private const val KEY_LAST_MODEL_ID = "last_model_id"
+
     private val _enabled = MutableStateFlow(false)
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
 
@@ -47,7 +50,17 @@ object LocalSettings {
             loaded.getInt(KEY_GPU_BACKEND, GpuBackend.AUTO.value),
         )
         // 用 byId 归一化：改过目录 id 或清过模型文件后，旧值必须退化成有效模型而不是空指针。
-        _selectedModelId.value = LocalModelCatalog.byId(loaded.getString(KEY_LOCAL_MODEL_ID, null)).id
+        // 迁移：本 key 不存在的旧版本用户，用翻译页的记忆项（last_model_id，同一个 prefs 文件）
+        // 播种——他们上次选的本地模型必须保留，否则升级后两个页面会各显示一个模型。
+        _selectedModelId.value = if (loaded.contains(KEY_LOCAL_MODEL_ID)) {
+            LocalModelCatalog.byId(loaded.getString(KEY_LOCAL_MODEL_ID, null)).id
+        } else {
+            val legacy = LocalModelCatalog.models
+                .firstOrNull { it.id == loaded.getString(KEY_LAST_MODEL_ID, null) }
+                ?.id ?: LocalModelCatalog.DEFAULT_MODEL_ID
+            loaded.edit().putString(KEY_LOCAL_MODEL_ID, legacy).apply()
+            legacy
+        }
     }
 
     fun setEnabled(context: Context, value: Boolean) {
