@@ -178,16 +178,14 @@ class TranslateViewModel(application: Application) : AndroidViewModel(applicatio
             _state.update { current ->
                 val provider = providers.firstOrNull { it.id == current.providerId }
                     ?: providers.firstOrNull()
-                // 本地 Provider 的 models 是「跑得动且已下载」的白名单：空列表意味着什么都不该选中，
-                // 再保留旧 modelId 会让下拉显示一个根本不在列表里的模型。在线 Provider 的 models
-                // 可能还没拉取过，保留旧 modelId 更友好。
+                // 本地 Provider 的模型选择以 LocalSettings.selectedModelId 为唯一事实源：
+                // 不保留旧 modelId，一律回落到 defaultModelId（仓库层已让它跟随 selectedModelId）。
+                // 在线 Provider 的 models 可能还没拉取过，保留旧 modelId 更友好。
                 val keepModel = provider != null &&
                     provider.id == current.providerId &&
+                    provider.id != LOCAL_PROVIDER_ID &&
                     !current.modelId.isNullOrBlank() &&
-                    (
-                        provider.models.any { it.id == current.modelId } ||
-                            (provider.models.isEmpty() && provider.id != LOCAL_PROVIDER_ID)
-                        )
+                    (provider.models.isEmpty() || provider.models.any { it.id == current.modelId })
                 val model = when {
                     provider == null -> null
                     keepModel -> current.modelId
